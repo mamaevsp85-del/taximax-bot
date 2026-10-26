@@ -303,8 +303,9 @@ async def serve_frontend(request):
             '.json': 'application/json',
         }
         content_type = content_types.get(ext, 'application/octet-stream')
-        return web.Response(body=f.read(), content_type=content_type, charset='utf-8')
-        return web.Response(body=f.read(), content_type=content_type, charset='utf-8')
+        with open(file_path, 'rb') as f:
+            data = f.read()
+        return web.Response(body=data, content_type=content_type, charset='utf-8')
     except Exception as exc:
         logger.exception("Serve frontend error")
         return web.Response(status=500, text=f'Error: {exc}')
