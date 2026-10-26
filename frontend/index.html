@@ -1,49 +1,28 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ТаксиМакс — Mini App</title>
-    <style>
-        body { font-family: sans-serif; max-width: 600px; margin: 20px auto; padding: 20px; }
-        .card { background: #fff; padding: 20px; margin: 10px 0; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        .btn { padding: 10px 20px; margin: 5px; cursor: pointer; }
-        .keyboard { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
-        .keyboard .btn { flex: 1; min-width: 100px; }
-        #message-area { margin-top: 20px; min-height: 80px; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#FFD000">
+  <title>Maximus Taxi</title>
+  <link rel="stylesheet" href="assets/fonts/fonts.css">
+  <link rel="stylesheet" href="css/app.css?v=fast">
+  <link rel="icon" href="assets/logo.jpg">
 </head>
 <body>
-    <h1>🚗 ТаксиМакс Mini App</h1>
-    <div class="card"><button class="btn" onclick="loadWelcome()">Начать</button></div>
-    <div id="message-area" class="loading">Загрузка...</div>
-    <script>
-        async function apiCall(endpoint, method = 'GET', body = null) {
-            const options = { method };
-            if (body) options.body = JSON.stringify(body);
-            const r = await fetch(endpoint, options);
-            return await r.json();
-        }
-        function showLoading() { document.getElementById('message-area').innerHTML = '<div class="loading">Загрузка...</div>'; }
-        async function loadWelcome() { showLoading(); const d = await apiCall('/api/passenger/welcome'); document.getElementById('message-area').innerHTML = d.text; }
-        async function loadRoleSelection() { showLoading(); const d = await apiCall('/api/passenger/role-selection'); document.getElementById('message-area').innerHTML = d.text; }
-        async function loadPassengerMenu() { showLoading(); const d = await apiCall('/api/passenger/menu'); renderContent(d); }
-        function renderContent(d) {
-            const a = document.getElementById('message-area'); a.innerHTML = '';
-            const p = document.createElement('p'); p.innerHTML = d.text; a.appendChild(p);
-            if (d.keyboard) {
-                const kb = document.createElement('div'); kb.className = 'keyboard';
-                d.keyboard.forEach(row => { row.forEach(bt => { const b = document.createElement('button'); b.className = 'btn'; b.textContent = bt.text; b.onclick = () => handleButtonClick(bt.callback_data); kb.appendChild(b); }); });
-                a.appendChild(kb);
-            }
-        }
-        function handleButtonClick(cb) { const [s, a] = cb.split(':'); if (s === 'passenger') { if (a === 'menu') loadPassengerMenu(); else if (a === 'profile') loadProfile(); else if (a === 'history') loadHistory(); else if (a === 'profile_menu') loadProfileMenu(); else if (a === 'profile_edit_name') editName(); else if (a === 'profile_edit_phone') editPhone(); } }
-        function loadProfile() { apiCall('/api/passenger/profile', 'GET', { user_id: 123456 }).then(d => renderContent(d)); }
-        function loadHistory() { apiCall('/api/passenger/history', 'GET', { user_id: 123456, page: 0 }).then(d => renderContent(d)); }
-        function loadProfileMenu() { apiCall('/api/passenger/menu').then(d => renderContent(d)); }
-        function editName() { showPrompt('Введите новое имя', name => { apiCall('/api/passenger/edit-name', 'POST', { name, user_id: 123456 }).then(d => renderContent(d)); }); }
-        function editPhone() { showPrompt('Введите новый телефон', phone => { apiCall('/api/passenger/edit-phone', 'POST', { phone, user_id: 123456 }).then(d => renderContent(d)); }); }
-        function showPrompt(msg, cb) { const v = prompt(msg); if (v) cb(v); }
-    </script>
+  <div class="stage">
+    <div class="shell" id="shell">
+      <header class="top" id="top"></header>
+      <main class="view" id="view"></main>
+      <nav class="tabs" id="tabs"></nav>
+    </div>
+  </div>
+  <div class="toast" id="toast" hidden></div>
+  <div class="sheet-back" id="sheet-back" hidden>
+    <div class="sheet" id="sheet" role="dialog"></div>
+  </div>
+  <script src="js/max-web-app.js"></script>
+  <script src="js/bridge.js"></script>
+  <script src="js/app.js?v=fast"></script>
 </body>
 </html>
