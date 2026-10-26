@@ -38,34 +38,35 @@ async def auth_middleware(request, handler):
     path = request.path
     if path == '/' or path.startswith('/assets/') or path.startswith('/css/') or path.startswith('/js/'):
         return await handler(request)
-    if path in ('/health', '/se14566736_bot', '/ws', '/debug/frontend'):
+    if path in ('/health', '/se14566736_bot', '/ws'):
         return await handler(request)
     if '.' in path.split('/')[-1] and not path.startswith('/api/'):
         return await handler(request)
     api_key = request.headers.get('X-API-Key') or request.query.get('api_key')
     if not api_key or api_key != settings.api_key:
         return web.json_response({'error': 'Unauthorized'}, status=401)
+    return await handler(request)
+
+
 async def health_check(request):
     return web.json_response({'status': 'healthy', 'bot': 'taxi_max', 'mode': 'silent'})
 
 
-
-    return await handler(request)
-
-
-async def debug_frontend(request):
-    import os
-    frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frontend')
-    files = []
-    if os.path.exists(frontend_dir):
-        for root, dirs, filenames in os.walk(frontend_dir):
-            for f in filenames:
-                rel = os.path.relpath(os.path.join(root, f), frontend_dir)
-                files.append(rel)
-    return web.json_response({'frontend_dir': frontend_dir, 'exists': os.path.exists(frontend_dir), 'files': files[:20]})
-
-
-
+async def geo_geocode(request):
+    try:
+        data = await request.json()
+        address = data.get('address', '')
+        if not address:
+            return web.json_response({'error': 'address required'}, status=400)
+        if address in _geo_cache:
+            return web.json_response(_geo_cache[address])
+        coords, city = await geocoder.geocode_address(address)
+        result = {'address': address, 'coords': coords, 'city': city, 'success': coords is not None}
+        _geo_cache[address] = result
+        return web.json_response(result)
+    except Exception as exc:
+        logger.exception("Geocode error")
+        return web.json_response({'error': str(exc)}, status=500)
 
 async def geo_route(request):
     try:
@@ -126,69 +127,6 @@ async def orders_price(request):
         logger.exception("Price error")
         return web.json_response({'error': str(exc)}, status=500)
 
-
-""",
-async def geo_route(request):
-    try:
-        data = await request.json()
-        from_coords = data.get('from', {})
-        to_coords = data.get('to', {})
-        if not from_coords or not to_coords:
-            return web.json_response({'error': 'from and to required'}, status=400)
-        import math, httpx
-        try:
-            async with httpx.AsyncClient(trust_env=False) as hc:
-                params = {'apikey': settings.yandex_api_key, 'waypoints': f"{from_coords['lon']},{from_coords['lat']}|{to_coords['lon']},{to_coords['lat']}", 'mode': 'driving'}
-                resp = await hc.get(settings.yandex_router_url, params=params, timeout=10.0)
-                resp.raise_for_status()
-                rd = resp.json()
-                route = rd.get('route', {})
-                result = {'from': from_coords, 'to': to_coords, 'distance': route.get('distance', 0), 'duration': route.get('duration', 0), 'polyline': route.get('polyline', ''), 'success': True}
-        except Exception:
-            lat1, lon1 = from_coords['lat'], from_coords['lon']
-            lat2, lon2 = to_coords['lat'], to_coords['lon']
-            R = 6371
-            dlat = math.radians(lat2 - lat1)
-            dlon = math.radians(lon2 - lon1)
-            a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
-            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-            distance = R * c * 1000
-            duration = distance / 1000 / 40 * 3600
-            result = {'from': from_coords, 'to': to_coords, 'distance': distance, 'duration': duration, 'polyline': '', 'success': True, 'fallback': True}
-        return web.json_response(result)
-    except Exception as exc:
-        logger.exception("Route error")
-        return web.json_response({'error': str(exc)}, status=500)
-
-
-async def orders_price(request):
-    try:
-        data = await request.json()
-        pickup = data.get('pickup', '')
-        destination = data.get('destination', '')
-        pickup_coords, pickup_city = await geocoder.geocode_address(pickup)
-        dest_coords, dest_city = await geocoder.geocode_address(destination)
-        if not pickup_coords or not dest_coords:
-            return web.json_response({'error': 'Could not geocode addresses'}, status=400)
-        import math
-        lat1, lon1 = pickup_coords['lat'], pickup_coords['lon']
-        lat2, lon2 = dest_coords['lat'], dest_coords['lon']
-        R = 6371
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-        a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-        distance = R * c
-        duration = distance / 40 * 60
-        tariff = get_tariff_settings(pickup_city)
-        price = calculate_trip_price(distance=distance, duration=duration, pickup_city=pickup_city, destination_city=dest_city)
-        return web.json_response({'pickup': pickup, 'destination': destination, 'pickup_coords': pickup_coords, 'dest_coords': dest_coords, 'pickup_city': pickup_city, 'dest_city': dest_city, 'distance': distance, 'duration': duration, 'price': price, 'tariff': tariff, 'success': True})
-    except Exception as exc:
-        logger.exception("Price error")
-        return web.json_response({'error': str(exc)}, status=500)
-
-
-""",
 async def orders_create(request):
     try:
         data = await request.json()
@@ -289,9 +227,6 @@ async def users_create(request):
         logger.exception("User create error")
         return web.json_response({'error': str(exc)}, status=500)
 
-
-""",
-
 async def websocket_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
@@ -385,7 +320,6 @@ def create_app():
     app.router.add_post('/api/users', users_create)
     app.router.add_get('/ws', websocket_handler)
     app.router.add_post('/se14566736_bot', webhook_handler)
-    app.router.add_get('/debug/frontend', debug_frontend)
     app.router.add_get('/{path:.*}', serve_frontend)
     return app
 
@@ -405,4 +339,4 @@ async def main():
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
-""",
+
