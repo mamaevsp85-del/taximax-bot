@@ -288,9 +288,9 @@ async def serve_frontend(request):
             return web.Response(status=404, text='Not found: ' + file_path)
         ext = os.path.splitext(file_path)[1].lower()
         content_types = {
-            '.html': 'text/html; charset=utf-8',
-            '.css': 'text/css; charset=utf-8',
-            '.js': 'text/javascript; charset=utf-8',
+            '.html': 'text/html',
+            '.css': 'text/css',
+            '.js': 'text/javascript',
             '.jpg': 'image/jpeg',
             '.jpeg': 'image/jpeg',
             '.png': 'image/png',
@@ -304,7 +304,7 @@ async def serve_frontend(request):
         }
         content_type = content_types.get(ext, 'application/octet-stream')
         with open(file_path, 'rb') as f:
-            return web.Response(body=f.read(), content_type=content_type)
+        return web.Response(body=f.read(), content_type=content_type, charset='utf-8')
     except Exception as exc:
         logger.exception("Serve frontend error")
         return web.Response(status=500, text=f'Error: {exc}')
