@@ -246,15 +246,20 @@ async def api_act(request):
 async def api_people(request):
     if not HAS_MAXIMUS:
         return web.json_response({'error': 'MaximusTaxi not available'}, status=503)
-    people = []
-    for user_id, user in storage.storage.users.items():
-        if int(user_id) <= 0:
-            continue
-        people.append({
-            'id': int(user_id),
-            'name': user.get('name') or user.get('driver_name') or f'id {user_id}',
-            'roles': storage.storage.compute_roles(int(user_id)),
-        })
+    try:
+        people = []
+        for user_id, user in storage.storage.users.items():
+            if int(user_id) <= 0:
+                continue
+            people.append({
+                'id': int(user_id),
+                'name': user.get('name') or user.get('driver_name') or f'id {user_id}',
+                'roles': storage.storage.compute_roles(int(user_id)),
+            })
+        people.sort(key=lambda p: p['name'])
+        return web.json_response({'ok': True, 'people': people})
+    except Exception as exc:
+        logger.exception("People error")
         return web.json_response({'error': str(exc)}, status=500)
 
 
