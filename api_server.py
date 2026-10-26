@@ -219,7 +219,42 @@ async def api_state(request):
             except (ValueError, TypeError):
                 uid = 0
         if not uid:
-            return web.json_response({'ok': False, 'error': 'Not authenticated'}, status=401)
+            # Return default state for anonymous users
+            return web.json_response({
+                'ok': True,
+                'user': {
+                    'id': 0,
+                    'name': '',
+                    'phone': '',
+                    'rating': 5,
+                    'roles': ['passenger'],
+                    'role': 'passenger',
+                    'driver_status': '',
+                    'reject_reason': '',
+                    'line': 'offline',
+                    'car_model': '',
+                    'car_number': '',
+                    'car_color': '',
+                    'driver_name': '',
+                    'driver_phone': '',
+                    'balance': 0.0,
+                    'balance_hidden': True,
+                    'access': True,
+                    'blocked': False,
+                    'geo': '',
+                    'lat': None,
+                    'lon': None,
+                    'docs': {'selfie': False, 'left': False, 'right': False, 'front': False, 'back': False, 'salon': False}
+                },
+                'passenger': {
+                    'active': None,
+                    'orders': [],
+                    'favorites': [],
+                    'stats': {'today': {'count': 0, 'sum': 0, 'km': 0}, 'week': {'count': 0, 'sum': 0, 'km': 0}, 'month': {'count': 0, 'sum': 0, 'km': 0}},
+                    'welcome': 'Welcome to TaxiMax! Please register.',
+                    'support': 'developer@example.com'
+                }
+            })
         state = state_for(uid)
         return web.json_response(state)
     except Exception as exc:
