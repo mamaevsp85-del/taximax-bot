@@ -17,6 +17,32 @@ from handlers.passenger_new import register_passenger
 from handlers.driver import register_driver
 from handlers.admin import register_admin
 
+logger = logging.getLogger("api_server")
+import sys
+MAXIMUS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'MaximusTaxi'))
+if MAXIMUS_DIR not in sys.path and os.path.exists(MAXIMUS_DIR):
+    sys.path.insert(0, MAXIMUS_DIR)
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('maximus_server', os.path.join(MAXIMUS_DIR, 'server.py'))
+        maximus_server = importlib.util.module_from_spec(spec)
+        maximus_server.__name__ = 'maximus_server'
+        spec.loader.exec_module(maximus_server)
+        state_for = maximus_server.state_for
+        act = maximus_server.act
+        HAS_MAXIMUS = True
+        logger.info('MaximusTaxi server imported successfully')
+    except Exception as e:
+        logger.warning('Could not import MaximusTaxi server: %s', e)
+        state_for = None
+        act = None
+        HAS_MAXIMUS = False
+else:
+    state_for = None
+    act = None
+    HAS_MAXIMUS = False
+    logger.warning('MaximusTaxi directory not found')
+
 storage.storage = storage.Storage()
 
 client = MaxClient()
@@ -26,7 +52,6 @@ register_passenger(router)
 register_driver(router)
 register_admin(router)
 
-logger = logging.getLogger("api_server")
 
 ws_connections = set()
 _geo_cache = {}
@@ -159,6 +184,89 @@ async def orders_create(request):
         return web.json_response({'success': True, 'order': order})
     except Exception as exc:
         logger.exception("Order creation error")
+        return web.json_response({'error': str(exc)}, status=500)
+
+async def api_state(request):
+    if not HAS_MAXIMUS:
+        return web.json_response({'error': 'MaximusTaxi not available'}, status=503)
+    uid = 0
+    # Try to get uid from cookie
+    cookie = request.cookies.get('mx')
+    if cookie:
+        try:
+            uid = int(cookie)
+        except ValueError:
+            pass
+    if not uid:
+        # Try from query
+        uid = int(request.query.get('uid', 0))
+    if not uid:
+        return web.json_response({'ok': False, 'error': 'Not authenticated'}, status=401)
+    try:
+        state = state_for(uid)
+        return web.json_response(state)
+    except Exception as exc:
+        logger.exception("State error")
+        return web.json_response({'error': str(exc)}, status=500)
+
+
+async def api_act(request):
+    if not HAS_MAXIMUS:
+        return web.json_response({'error': 'MaximusTaxi not available'}, status=503)
+    uid = 0
+    cookie = request.cookies.get('mx')
+    if cookie:
+        try:
+            uid = int(cookie)
+        except ValueError:
+            pass
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if data.get('op') == 'login' and data.get('max_id'):
+        data['user_id'] = int(data['max_id'])
+        if data.get('name'):
+            storage.storage.ensure_user(int(data['user_id']), name=data['name'])
+    op = data.get('op') or ''
+    if op == 'login' and not data.get('max_id') and not uid:
+        return web.json_response({'ok': False, 'error': 'Not authenticated'}, status=403)
+    if not uid and op != 'login':
+        uid = int(data.get('user_id', 0))
+    try:
+        result = act(uid, data)
+        who = int(result.get('user_id') or uid or 0)
+        if result.get('ok') and who and data.get('op') != 'quote':
+            try:
+                result['state'] = state_for(who)
+            except Exception:
+                pass
+        cookie_user = result.get('user_id') if data.get('op') == 'login' else None
+        resp = web.json_response(result)
+        if cookie_user:
+            resp.set_cookie('mx', str(cookie_user), max_age=30*24*3600)
+        return resp
+    except PermissionError as exc:
+        return web.json_response({'ok': False, 'error': str(exc)}, status=403)
+    except ValueError as exc:
+        return web.json_response({'ok': False, 'error': str(exc)}, status=400)
+    except Exception as exc:
+        logger.exception("Act error")
+        return web.json_response({'ok': False, 'error': str(exc)}, status=500)
+
+
+async def api_people(request):
+    if not HAS_MAXIMUS:
+        return web.json_response({'error': 'MaximusTaxi not available'}, status=503)
+    people = []
+    for user_id, user in storage.storage.users.items():
+        if int(user_id) <= 0:
+            continue
+        people.append({
+            'id': int(user_id),
+            'name': user.get('name') or user.get('driver_name') or f'id {user_id}',
+            'roles': storage.storage.compute_roles(int(user_id)),
+        })
         return web.json_response({'error': str(exc)}, status=500)
 
 
@@ -311,6 +419,7 @@ async def serve_frontend(request):
         return web.Response(status=500, text=f'Error: {exc}')
 
 
+
 def create_app():
     app = web.Application(middlewares=[auth_middleware])
     app.router.add_get('/health', health_check)
@@ -325,6 +434,10 @@ def create_app():
     app.router.add_post('/api/users', users_create)
     app.router.add_get('/ws', websocket_handler)
     app.router.add_post('/se14566736_bot', webhook_handler)
+    # Mini-App compatibility endpoints
+    app.router.add_get('/api/state', api_state)
+    app.router.add_post('/api/act', api_act)
+    app.router.add_get('/api/people', api_people)
     app.router.add_get('/{path:.*}', serve_frontend)
     return app
 
