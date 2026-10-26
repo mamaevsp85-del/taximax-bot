@@ -200,8 +200,10 @@ class Storage:
 
     # ==================== РОЛИ ====================
     def compute_roles(self, user_id: int) -> list:
-        roles = [ROLE_PASSENGER]
         u = self.users.get(int(user_id), {})
+        roles = []
+        if not u.get("passenger_removed"):
+            roles.append(ROLE_PASSENGER)
         if u.get("driver_verification_status") == "approved":
             roles.append(ROLE_DRIVER)
         if self.is_admin(user_id):
