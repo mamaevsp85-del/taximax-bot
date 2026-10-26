@@ -47,6 +47,21 @@ _route_cache = {}
 
 
 @web.middleware
+async def cors_middleware(request, handler):
+    if request.method == 'OPTIONS':
+        response = web.Response(status=200)
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
+        return response
+    response = await handler(request)
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
+    return response
+
+
+@web.middleware
 async def auth_middleware(request, handler):
     path = request.path
     # Allow static files without auth
@@ -606,7 +621,7 @@ async def serve_frontend(request):
 
 
 def create_app():
-    app = web.Application(middlewares=[auth_middleware])
+    app = web.Application(middlewares=[cors_middleware, auth_middleware])
     app.router.add_get('/health', health_check)
     app.router.add_post('/api/geo/geocode', geo_geocode)
     app.router.add_post('/api/geo/route', geo_route)
