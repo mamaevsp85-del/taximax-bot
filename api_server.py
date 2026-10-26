@@ -278,32 +278,36 @@ async def webhook_handler(request):
 
 
 async def serve_frontend(request):
-    path = request.path
-    if path == '/':
-        path = '/index.html'
-    frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frontend')
-    file_path = os.path.normpath(os.path.join(frontend_dir, path.lstrip('/')))
-    if not file_path.startswith(frontend_dir) or not os.path.isfile(file_path):
-        return web.Response(status=404, text='Not found')
-    ext = os.path.splitext(file_path)[1].lower()
-    content_types = {
-        '.html': 'text/html; charset=utf-8',
-        '.css': 'text/css; charset=utf-8',
-        '.js': 'text/javascript; charset=utf-8',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.png': 'image/png',
-        '.gif': 'image/gif',
-        '.svg': 'image/svg+xml',
-        '.ico': 'image/x-icon',
-        '.woff': 'font/woff',
-        '.woff2': 'font/woff2',
-        '.ttf': 'font/ttf',
-        '.json': 'application/json',
-    }
-    content_type = content_types.get(ext, 'application/octet-stream')
-    with open(file_path, 'rb') as f:
-        return web.Response(body=f.read(), content_type=content_type)
+    try:
+        path = request.path
+        if path == '/':
+            path = '/index.html'
+        frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frontend')
+        file_path = os.path.normpath(os.path.join(frontend_dir, path.lstrip('/')))
+        if not file_path.startswith(frontend_dir) or not os.path.isfile(file_path):
+            return web.Response(status=404, text='Not found: ' + file_path)
+        ext = os.path.splitext(file_path)[1].lower()
+        content_types = {
+            '.html': 'text/html; charset=utf-8',
+            '.css': 'text/css; charset=utf-8',
+            '.js': 'text/javascript; charset=utf-8',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.svg': 'image/svg+xml',
+            '.ico': 'image/x-icon',
+            '.woff': 'font/woff',
+            '.woff2': 'font/woff2',
+            '.ttf': 'font/ttf',
+            '.json': 'application/json',
+        }
+        content_type = content_types.get(ext, 'application/octet-stream')
+        with open(file_path, 'rb') as f:
+            return web.Response(body=f.read(), content_type=content_type)
+    except Exception as exc:
+        logger.exception("Serve frontend error")
+        return web.Response(status=500, text=f'Error: {exc}')
 
 
 def create_app():
