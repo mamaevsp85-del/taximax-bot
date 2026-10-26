@@ -1,12 +1,15 @@
-# Зависимости независимого MAX-бота «ТаксиМакс»
+# Зависимости MAX-бота такси
 # Python 3.10+
 
-# HTTP-клиент (запросы к MAX API, Яндексу, OpenRouteService)
+# HTTP-клиент (работа с MAX API, геокодер, OpenRouteService)
 httpx>=0.27.0
 
-# Корневые SSL-сертификаты (без этого на Windows: SSL CERTIFICATE_VERIFY_FAILED)
+# SSL-сертификаты (для работы на Windows: SSL CERTIFICATE_VERIFY_FAILED)
 certifi>=2023.7.22
 
-# Конфигурация из .env + валидация
+# Валидация и конфигурация из .env
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
+
+# Web-сервер (API + WebSocket + Webhook)
+aiohttp>=3.9.0
