@@ -38,18 +38,32 @@ async def auth_middleware(request, handler):
     path = request.path
     if path == '/' or path.startswith('/assets/') or path.startswith('/css/') or path.startswith('/js/'):
         return await handler(request)
-    if path in ('/health', '/se14566736_bot', '/ws'):
+    if path in ('/health', '/se14566736_bot', '/ws', '/debug/frontend'):
         return await handler(request)
     if '.' in path.split('/')[-1] and not path.startswith('/api/'):
         return await handler(request)
     api_key = request.headers.get('X-API-Key') or request.query.get('api_key')
     if not api_key or api_key != settings.api_key:
         return web.json_response({'error': 'Unauthorized'}, status=401)
+async def health_check(request):
+    return web.json_response({'status': 'healthy', 'bot': 'taxi_max', 'mode': 'silent'})
+
+
+
     return await handler(request)
 
 
-async def health_check(request):
-    return web.json_response({'status': 'healthy', 'bot': 'taxi_max', 'mode': 'silent'})
+async def debug_frontend(request):
+    import os
+    frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frontend')
+    files = []
+    if os.path.exists(frontend_dir):
+        for root, dirs, filenames in os.walk(frontend_dir):
+            for f in filenames:
+                rel = os.path.relpath(os.path.join(root, f), frontend_dir)
+                files.append(rel)
+    return web.json_response({'frontend_dir': frontend_dir, 'exists': os.path.exists(frontend_dir), 'files': files[:20]})
+
 
 
 
@@ -371,6 +385,7 @@ def create_app():
     app.router.add_post('/api/users', users_create)
     app.router.add_get('/ws', websocket_handler)
     app.router.add_post('/se14566736_bot', webhook_handler)
+    app.router.add_get('/debug/frontend', debug_frontend)
     app.router.add_get('/{path:.*}', serve_frontend)
     return app
 
