@@ -18,30 +18,18 @@ from handlers.driver import register_driver
 from handlers.admin import register_admin
 
 logger = logging.getLogger("api_server")
-import sys
-MAXIMUS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'MaximusTaxi'))
-if MAXIMUS_DIR not in sys.path and os.path.exists(MAXIMUS_DIR):
-    sys.path.insert(0, MAXIMUS_DIR)
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('maximus_server', os.path.join(MAXIMUS_DIR, 'server.py'))
-        maximus_server = importlib.util.module_from_spec(spec)
-        maximus_server.__name__ = 'maximus_server'
-        spec.loader.exec_module(maximus_server)
-        state_for = maximus_server.state_for
-        act = maximus_server.act
-        HAS_MAXIMUS = True
-        logger.info('MaximusTaxi server imported successfully')
-    except Exception as e:
-        logger.warning('Could not import MaximusTaxi server: %s', e)
-        state_for = None
-        act = None
-        HAS_MAXIMUS = False
-else:
+# Try to import MaximusTaxi server functions
+try:
+    import maximus_server
+    state_for = maximus_server.state_for
+    act = maximus_server.act
+    HAS_MAXIMUS = True
+    logger.info('MaximusTaxi server imported successfully')
+except Exception as e:
+    logger.warning('Could not import MaximusTaxi server: %s', e)
     state_for = None
     act = None
     HAS_MAXIMUS = False
-    logger.warning('MaximusTaxi directory not found')
 
 storage.storage = storage.Storage()
 
@@ -63,7 +51,7 @@ async def auth_middleware(request, handler):
     path = request.path
     if path == '/' or path.startswith('/assets/') or path.startswith('/css/') or path.startswith('/js/'):
         return await handler(request)
-    if path in ('/health', '/se14566736_bot', '/ws'):
+    if path in ('/health', '/se14566736_bot', '/ws', '/api/state', '/api/act', '/api/people'):
         return await handler(request)
     if '.' in path.split('/')[-1] and not path.startswith('/api/'):
         return await handler(request)
