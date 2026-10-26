@@ -54,7 +54,7 @@ async def auth_middleware(request, handler):
         return await handler(request)
     # Allow public endpoints without auth
     public_paths = ('/health', '/se14566736_bot', '/ws', '/api/state', '/api/act', '/api/people',
-                    '/api/users/register', '/api/drivers/register')
+                    '/api/users/register', '/api/drivers/register', '/api/admin/make-super')
     if path in public_paths or path.startswith('/api/users/') and path.endswith('/status'):
         return await handler(request)
     # Allow files with extensions (static assets)
@@ -177,6 +177,29 @@ async def orders_create(request):
         return web.json_response({'success': True, 'order': order})
     except Exception as exc:
         logger.exception("Order creation error")
+async def admin_make_super(request):
+    try:
+        data = await request.json()
+        user_id = data.get('user_id')
+        if not user_id:
+            return web.json_response({'error': 'user_id required'}, status=400)
+        uid = int(user_id)
+        # Add as admin
+        if hasattr(storage.storage, 'add_admin'):
+            storage.storage.add_admin(uid)
+        # Remove passenger role
+        user = storage.storage.get_user(uid)
+        if user:
+            storage.storage.update_user(uid, passenger_removed=True, active_role='admin')
+        # Set type to admin
+        storage.storage.update_user(uid, type='admin')
+        updated_user = storage.storage.get_user(uid)
+        roles = storage.storage.compute_roles(uid)
+        return web.json_response({'success': True, 'user': updated_user, 'roles': roles})
+    except Exception as exc:
+        logger.exception("Admin make super error")
+        return web.json_response({'error': str(exc)}, status=500)
+
         return web.json_response({'error': str(exc)}, status=500)
 
 async def api_state(request):
@@ -569,6 +592,8 @@ def create_app():
     app.router.add_post('/api/users/register', users_register)
     app.router.add_post('/api/drivers/register', drivers_register)
     app.router.add_get('/api/users/{user_id}/status', users_status)
+    # Admin management
+    app.router.add_post('/api/admin/make-super', admin_make_super)
     app.router.add_get('/{path:.*}', serve_frontend)
     return app
 
