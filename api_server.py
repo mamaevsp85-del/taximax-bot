@@ -49,10 +49,15 @@ _route_cache = {}
 @web.middleware
 async def auth_middleware(request, handler):
     path = request.path
+    # Allow static files without auth
     if path == '/' or path.startswith('/assets/') or path.startswith('/css/') or path.startswith('/js/'):
         return await handler(request)
-    if path in ('/health', '/se14566736_bot', '/ws', '/api/state', '/api/act', '/api/people'):
+    # Allow public endpoints without auth
+    public_paths = ('/health', '/se14566736_bot', '/ws', '/api/state', '/api/act', '/api/people',
+                    '/api/users/register', '/api/drivers/register')
+    if path in public_paths or path.startswith('/api/users/') and path.endswith('/status'):
         return await handler(request)
+    # Allow files with extensions (static assets)
     if '.' in path.split('/')[-1] and not path.startswith('/api/'):
         return await handler(request)
     api_key = request.headers.get('X-API-Key') or request.query.get('api_key')
@@ -177,6 +182,113 @@ async def orders_create(request):
 async def api_state(request):
     if not HAS_MAXIMUS:
         return web.json_response({'error': 'MaximusTaxi not available'}, status=503)
+async def users_register(request):
+    try:
+        data = await request.json()
+        user_id = data.get('user_id')
+        name = data.get('name', '').strip()
+        phone = data.get('phone', '').strip()
+        role = data.get('role', 'passenger')
+        
+        if not user_id:
+            return web.json_response({'error': 'user_id required'}, status=400)
+        if not name:
+            return web.json_response({'error': 'name required'}, status=400)
+        
+        # Ensure user exists
+        storage.storage.ensure_user(user_id, role)
+        
+        # Update user profile
+        fields = {'name': name}
+        if phone:
+            fields['phone'] = phone
+        storage.storage.update_user(user_id, **fields)
+        
+        # Set role
+        if role == 'driver':
+            storage.storage.set_active_role(user_id, 'driver')
+        else:
+            storage.storage.set_active_role(user_id, 'passenger')
+        
+        user = storage.storage.get_user(user_id)
+        return web.json_response({'success': True, 'user': user, 'registered': True})
+    except Exception as exc:
+        logger.exception("User register error")
+        return web.json_response({'error': str(exc)}, status=500)
+
+
+async def drivers_register(request):
+    try:
+        data = await request.json()
+        user_id = data.get('user_id')
+        name = data.get('name', '').strip()
+        phone = data.get('phone', '').strip()
+        car_number = data.get('car_number', '').strip()
+        car_color = data.get('car_color', '').strip()
+        car_photo = data.get('car_photo', '')
+        
+        if not user_id:
+            return web.json_response({'error': 'user_id required'}, status=400)
+        if not name:
+            return web.json_response({'error': 'name required'}, status=400)
+        if not car_number:
+            return web.json_response({'error': 'car_number required'}, status=400)
+        
+        # Ensure user exists as driver
+        storage.storage.ensure_user(user_id, 'driver')
+        
+        # Update user profile
+        fields = {'name': name, 'driver_name': name}
+        if phone:
+            fields['phone'] = phone
+            fields['driver_phone'] = phone
+        if car_number:
+            fields['car_number'] = car_number
+        if car_color:
+            fields['car_color'] = car_color
+        if car_photo:
+            fields['car_photo'] = car_photo
+        
+        storage.storage.update_user(user_id, **fields)
+        storage.storage.set_active_role(user_id, 'driver')
+        
+        # Submit driver application for moderation
+        if hasattr(storage.storage, 'submit_driver_application'):
+            storage.storage.submit_driver_application(user_id)
+        
+        user = storage.storage.get_user(user_id)
+        return web.json_response({'success': True, 'user': user, 'registered': True, 'status': 'pending_moderation'})
+    except Exception as exc:
+        logger.exception("Driver register error")
+        return web.json_response({'error': str(exc)}, status=500)
+
+
+async def users_status(request):
+    try:
+        user_id = int(request.match_info['user_id'])
+        user = storage.storage.get_user(user_id)
+        if not user:
+            return web.json_response({'registered': False, 'user': None})
+        
+        has_name = bool(user.get('name') or user.get('driver_name'))
+        has_phone = bool(user.get('phone') or user.get('driver_phone'))
+        active_role = storage.storage.get_active_role(user_id) if hasattr(storage.storage, 'get_active_role') else None
+        roles = storage.storage.compute_roles(user_id) if hasattr(storage.storage, 'compute_roles') else []
+        
+        return web.json_response({
+            'registered': has_name,
+            'user': user,
+            'has_name': has_name,
+            'has_phone': has_phone,
+            'active_role': active_role,
+            'roles': roles,
+            'is_driver': 'driver' in roles,
+            'is_admin': 'admin' in roles,
+        })
+    except Exception as exc:
+        logger.exception("User status error")
+        return web.json_response({'error': str(exc)}, status=500)
+
     uid = 0
     # Try to get uid from cookie
     cookie = request.cookies.get('mx')
@@ -431,6 +543,10 @@ def create_app():
     app.router.add_get('/api/state', api_state)
     app.router.add_post('/api/act', api_act)
     app.router.add_get('/api/people', api_people)
+    # Registration endpoints
+    app.router.add_post('/api/users/register', users_register)
+    app.router.add_post('/api/drivers/register', drivers_register)
+    app.router.add_get('/api/users/{user_id}/status', users_status)
     app.router.add_get('/{path:.*}', serve_frontend)
     return app
 
