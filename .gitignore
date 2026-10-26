@@ -1,0 +1,52 @@
+# Environment
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# Data
+data/
+*.json
+
+# Logs
+*.log
+*.txt
+!requirements.txt
+*.out
+
+# Ngrok
+ngrok.exe
+ngrok.zip
+ngrok/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+.pytest_cache/
+.pytest_output.txt
+
+# Debug
+_debug_archive/
+temp_content.txt
+temp_readme.txt
+
+# Temporary files
+_*.py
+_*.txt
+*.tmp
