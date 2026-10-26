@@ -182,6 +182,28 @@ async def orders_create(request):
 async def api_state(request):
     if not HAS_MAXIMUS:
         return web.json_response({'error': 'MaximusTaxi not available'}, status=503)
+    try:
+        uid = 0
+        cookie = request.cookies.get('mx')
+        if cookie:
+            try:
+                uid = int(cookie)
+            except (ValueError, TypeError):
+                pass
+        if not uid:
+            try:
+                uid = int(request.query.get('uid', 0) or 0)
+            except (ValueError, TypeError):
+                uid = 0
+        if not uid:
+            return web.json_response({'ok': False, 'error': 'Not authenticated'}, status=401)
+        state = state_for(uid)
+        return web.json_response(state)
+    except Exception as exc:
+        logger.exception("State error")
+        return web.json_response({'error': str(exc)}, status=500)
+
+
 async def users_register(request):
     try:
         data = await request.json()
