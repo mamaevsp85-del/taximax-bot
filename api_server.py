@@ -200,18 +200,24 @@ async def admin_make_super(request):
     try:
         data = await request.json()
         user_id = data.get('user_id')
+        remove_passenger = data.get('remove_passenger', False)
         if not user_id:
             return web.json_response({'error': 'user_id required'}, status=400)
         uid = int(user_id)
         # Add as admin
         if hasattr(storage.storage, 'add_admin'):
             storage.storage.add_admin(uid)
-        # Remove passenger role
+        # Update user
         user = storage.storage.get_user(uid)
         if user:
-            storage.storage.update_user(uid, passenger_removed=True, active_role='admin')
-        # Set type to admin
-        storage.storage.update_user(uid, type='admin')
+            fields = {'active_role': 'admin', 'type': 'admin'}
+            if remove_passenger:
+                fields['passenger_removed'] = True
+            else:
+                # Ensure passenger role is not removed
+                if 'passenger_removed' in (user or {}):
+                    fields['passenger_removed'] = False
+            storage.storage.update_user(uid, **fields)
         updated_user = storage.storage.get_user(uid)
         roles = storage.storage.compute_roles(uid)
         return web.json_response({'success': True, 'user': updated_user, 'roles': roles})
