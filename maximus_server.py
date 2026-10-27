@@ -687,6 +687,28 @@ def act(uid: int, body: dict) -> dict:
         logger.info("Диагностика клиента %s: %s", uid, S.admin_data["client_diag"][str(uid)])
         return {"ok": True}
 
+    if op == "geo.suggest":
+        # Подсказки адреса при вводе (автодополнение)
+        query = str(body.get("query") or "").strip()
+        if len(query) < 2:
+            return {"ok": True, "items": []}
+        city = str(body.get("city") or "").strip()
+        if not city and uid:
+            u = S.get_user(uid) or {}
+            city = u.get("home_city") or u.get("current_city") or ""
+        lat = body.get("lat")
+        lon = body.get("lon")
+        try:
+            lat = float(lat) if lat is not None else None
+            lon = float(lon) if lon is not None else None
+        except (TypeError, ValueError):
+            lat = lon = None
+        items = run(geocoder.suggest_address(
+            query, city=city, limit=int(body.get("limit") or 8),
+            near_lat=lat, near_lon=lon,
+        ))
+        return {"ok": True, "items": items}
+
     if op == "geo.resolve":
         # Геокодинг не требует авторизации
         if body.get("address"):

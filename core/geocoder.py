@@ -31,6 +31,9 @@ def _validate_coordinates(lat1, lon1, lat2, lon2) -> bool:
         return False
 
 
+SUGGEST_URL = "https://suggest-maps.yandex.ru/v1/suggest"
+
+
 def _extract_city(components) -> str:
     """Город из компонентов адреса: сначала locality, затем area/province."""
     names = {"locality": "", "area": "", "province": ""}
@@ -254,4 +257,92 @@ async def calculate_distance_and_time(lat1, lon1, lat2, lon2,
     if total_distance == 0.0:
         # Фолбэк: гаверсинус на дистанцию точка-точка
         return calculate_approximate_distance_and_time(lat1, lon1, lat2, lon2)
+
+
+async def suggest_address(query: str, city: str = "", limit: int = 8,
+                          near_lat: Optional[float] = None,
+                          near_lon: Optional[float] = None) -> list:
+    """Подсказки адреса через Yandex Suggest.
+
+    Ищет в пределах города (если известен) и отбрасывает чужие регионы.
+    Возвращает: [{"title", "subtitle", "address", "kind"}]
+    """
+    text = (query or "").strip()
+    if len(text) < 2:
+        return []
+
+    city_part = (city or "").strip()
+    search_text = text
+    if city_part and city_part.lower() not in text.lower():
+        search_text = f"{text}, {city_part}"
+
+    params = {
+        "text": search_text,
+        "apikey": settings.yandex_api_key,
+        "lang": "ru_RU",
+        "results": str(max(4, min(limit * 3, 20))),
+        "print_address": "1",
+        "types": "biz,geo",
+    }
+    if near_lat is not None and near_lon is not None:
+        params["ll"] = f"{near_lon},{near_lat}"
+        params["spn"] = "0.8,0.8"
+
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            resp = await client.get(SUGGEST_URL, params=params, timeout=8.0)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:
+        logger.warning("Suggest недоступен для %r: %s", search_text, exc)
+        return []
+
+    own_city = city_part.lower()
+    results = []
+    for item in data.get("results") or []:
+        title = ((item.get("title") or {}).get("text") or "").strip()
+        subtitle = ((item.get("subtitle") or {}).get("text") or "").strip()
+        address = ((item.get("address") or {}).get("formatted_address") or "").strip()
+        tags = item.get("tags") or []
+        if not title:
+            continue
+
+        # Отбрасываем сам город и регион — они не адрес
+        if tags and tags[0] in ("locality", "province", "country", "area"):
+            continue
+
+        haystack = f"{subtitle} {address}".lower()
+        if own_city and haystack.strip() and own_city not in haystack:
+            continue
+
+        results.append({
+            "title": title,
+            "subtitle": subtitle,
+            "address": address or f"{title}, {subtitle}".strip(", "),
+            "kind": tags[0] if tags else "",
+        })
+        if len(results) >= limit:
+            break
+
+    # Если в своём городе ничего не нашли — показываем результаты без фильтра,
+    # чтобы пассажир мог указать адрес в другом городе (межгород)
+    if not results and city_part:
+        for item in (data.get("results") or [])[:limit]:
+            title = ((item.get("title") or {}).get("text") or "").strip()
+            subtitle = ((item.get("subtitle") or {}).get("text") or "").strip()
+            address = ((item.get("address") or {}).get("formatted_address") or "").strip()
+            tags = item.get("tags") or []
+            if not title:
+                continue
+            if tags and tags[0] in ("locality", "province", "country", "area"):
+                continue
+            results.append({
+                "title": title,
+                "subtitle": subtitle,
+                "address": address or f"{title}, {subtitle}".strip(", "),
+                "kind": tags[0] if tags else "",
+            })
+
+    return results
+
     return total_distance, max(1, total_duration)

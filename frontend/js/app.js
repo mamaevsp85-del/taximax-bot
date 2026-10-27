@@ -785,6 +785,77 @@
     }
   }
 
+  // ==================== АВТОДОПОЛНЕНИЕ АДРЕСА ====================
+  var _suggestTimer = null;
+  var _suggestSeq = 0;
+
+  function attachSuggest(inputId, onPick, opts) {
+    var input = document.getElementById(inputId);
+    if (!input) return;
+    var options = opts || {};
+
+    var box = document.createElement("div");
+    box.className = "suggest-box";
+    box.hidden = true;
+    input.parentNode.appendChild(box);
+
+    function hide() { box.hidden = true; box.innerHTML = ""; }
+
+    function show(items) {
+      if (!items || !items.length) { hide(); return; }
+      box.innerHTML = items.map(function (it, i) {
+        var icon = it.kind === "house" ? "\ud83c\udfe0" : it.kind === "street" ? "\ud83d\uded23" :
+                   it.kind === "locality" ? "\ud83c\udfd9" : "\ud83d\udccd";
+        return '<button type="button" class="suggest-item" data-i="' + i + '">' +
+          '<i>' + icon + '</i><span><b>' + esc(it.title) + '</b>' +
+          '<small>' + esc(it.subtitle || it.address) + '</small></span></button>';
+      }).join("");
+      box.hidden = false;
+
+      var btns = box.querySelectorAll(".suggest-item");
+      for (var k = 0; k < btns.length; k++) {
+        (function (btn) {
+          btn.addEventListener("click", function (e) {
+            e.preventDefault();
+            var it = items[Number(btn.dataset.i)];
+            input.value = it.title + (it.subtitle ? ", " + it.subtitle.split(",")[0] : "");
+            hide();
+            if (onPick) onPick(it);
+          });
+        })(btns[k]);
+      }
+    }
+
+    function fetchSuggest(query) {
+      var seq = ++_suggestSeq;
+      api("/api/act", {
+        op: "geo.suggest",
+        query: query,
+        city: options.city || (S && S.user && S.user.home_city) || "",
+        lat: options.lat || null,
+        lon: options.lon || null
+      }).then(function (res) {
+        if (seq !== _suggestSeq) return;
+        show(res.items || []);
+      }).catch(function () { hide(); });
+    }
+
+    input.addEventListener("input", function () {
+      var q = input.value.trim();
+      clearTimeout(_suggestTimer);
+      if (q.length < 2) { hide(); return; }
+      _suggestTimer = setTimeout(function () { fetchSuggest(q); }, 320);
+    });
+
+    input.addEventListener("blur", function () {
+      setTimeout(hide, 180);
+    });
+
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") hide();
+    });
+  }
+
   // ГЕО ЧЕРЕЗ БОТ: закрываем мини-апп, в чате уже лежит кнопка гео
   function requestGeoViaBot(kind, onDone, onFail) {
     var attempts = 0;
@@ -877,6 +948,24 @@
     $("tabs").innerHTML = tabs();
     var fn = views[screen];
     $("view").innerHTML = fn ? fn() : "<p>Экран не найден</p>";
+
+    // Подключаем автодополнение адреса на нужных экранах
+    if (screen === "trip") {
+      var step = (draft && draft.step) || 1;
+      if (step === 1) {
+        attachSuggest("pickup", function (it) {
+          draft.pickup = it.title + (it.subtitle ? ", " + it.subtitle.split(",")[0] : "");
+        });
+      } else if (step === 2) {
+        attachSuggest("dest", function (it) {
+          draft.destination = it.title + (it.subtitle ? ", " + it.subtitle.split(",")[0] : "");
+        });
+      }
+    }
+    if (screen === "d-geo" || screen === "d-current") {
+      attachSuggest("geoaddr", null);
+    }
+
     var deep = stack.length > 0 && screen !== homeOf();
     window.Maximus.back(deep, function () {
       screen = stack.pop() || homeOf();

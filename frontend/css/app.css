@@ -403,6 +403,81 @@ h2:first-child { margin-top: 4px; }
 
 
 /* =========================================================
+   ПОДСКАЗКИ АДРЕСА (автодополнение)
+   ========================================================= */
+
+label.field { position: relative; }
+
+.suggest-box {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  z-index: 30;
+  margin-top: 4px;
+  background: var(--surface);
+  border: 1.5px solid var(--line-2);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  max-height: 280px;
+  overflow-y: auto;
+  animation: suggest-in 0.16s var(--ease);
+}
+
+.suggest-box[hidden] { display: none; }
+
+@keyframes suggest-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.suggest-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  transition: background 0.12s var(--ease);
+}
+
+.suggest-item:last-child { border-bottom: 0; }
+.suggest-item:hover, .suggest-item:active { background: var(--surface-2); }
+
+.suggest-item i {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  font-style: normal;
+  font-size: 15px;
+  border: 1px solid rgba(255, 204, 0, 0.25);
+}
+
+.suggest-item span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.suggest-item b {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.suggest-item small {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* =========================================================
    ЗНАКОМСТВО (первый вход)
    ========================================================= */
 
