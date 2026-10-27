@@ -975,13 +975,14 @@ select:focus {
 
 .pick-map {
   position: relative;
-  height: 240px;
+  height: 280px;
   border-radius: var(--r-md);
   overflow: hidden;
   background: var(--surface-3);
   touch-action: none;
   cursor: grab;
   border: 1.5px solid var(--line-2);
+  margin-bottom: 4px;
 }
 
 .pick-tiles { position: absolute; inset: 0; }

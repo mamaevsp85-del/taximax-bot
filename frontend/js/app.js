@@ -576,7 +576,7 @@
 
   var mapDraft = null;
   var mapDone = null;
-  var MAP_Z = 16;
+  var MAP_Z = 15;
   function mapWorld(lat, lon) {
     var n = Math.pow(2, MAP_Z);
     var rad = lat * Math.PI / 180;
