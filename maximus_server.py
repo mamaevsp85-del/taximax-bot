@@ -695,6 +695,10 @@ def admin_act(body: dict) -> dict:
             if body.get(field) is not None:
                 S.admin_data[key] = body[field]
         S.save()
+    elif op == "reset_roles":
+        S.remove_admin(uid)
+        S.update_user(uid, type="user", active_role="passenger", passenger_removed=True, driver_verification_status=None)
+        return {"ok": True}
     elif op == "admin.manager.add":
         S.add_manager(int(body["id"]))
     elif op == "admin.manager.remove":
