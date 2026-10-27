@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import logging
 import os
 import sys
 import traceback
@@ -33,6 +34,8 @@ from core.driver_support import (  # noqa: E402
 )
 from core import geocoder  # noqa: E402
 import httpx  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 _GEO_CACHE: dict = {}
 _ROUTE_CACHE: dict = {}
@@ -663,6 +666,25 @@ def act(uid: int, body: dict) -> dict:
         if not uid:
             raise PermissionError("Сначала выберите профиль")
         S.clear_geo_request(uid)
+        return {"ok": True}
+
+    if op == "client.diag":
+        # Диагностика окружения мини-приложения (для отладки гео)
+        if not uid:
+            raise PermissionError("Сначала выберите профиль")
+        info = body.get("info") or {}
+        S.admin_data.setdefault("client_diag", {})[str(uid)] = {
+            "at": datetime.now().isoformat(),
+            "user_agent": str(info.get("userAgent") or "")[:300],
+            "platform": str(info.get("platform") or "")[:40],
+            "is_iframe": bool(info.get("isIframe")),
+            "has_geolocation": bool(info.get("hasGeolocation")),
+            "geo_error": str(info.get("geoError") or "")[:120],
+            "secure_context": bool(info.get("secureContext")),
+            "has_bridge": bool(info.get("hasBridge")),
+        }
+        S.save()
+        logger.info("Диагностика клиента %s: %s", uid, S.admin_data["client_diag"][str(uid)])
         return {"ok": True}
 
     if op == "geo.resolve":

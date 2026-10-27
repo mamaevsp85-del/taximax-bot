@@ -755,6 +755,36 @@
     if (typeof onReady === "function") onReady(mapDraft);
   }
 
+  // Диагностика окружения: какой движок, iframe ли, есть ли гео
+  function sendClientDiag(geoError) {
+    if (!S || !S.user) return;
+    var info = {
+      userAgent: navigator.userAgent || "",
+      platform: (window.WebApp && window.WebApp.platform) || "",
+      isIframe: window.self !== window.top,
+      hasGeolocation: !!navigator.geolocation,
+      geoError: geoError || "",
+      secureContext: !!window.isSecureContext,
+      hasBridge: !!(window.Maximus && window.Maximus.hasBridge && window.Maximus.hasBridge())
+    };
+    api("/api/act", { op: "client.diag", info: info }).catch(function () {});
+  }
+
+  // Проверяем, доступна ли геолокация браузера, и сообщаем на сервер
+  function probeGeolocation() {
+    if (!navigator.geolocation) { sendClientDiag("no-api"); return; }
+    if (!window.isSecureContext) { sendClientDiag("not-secure"); return; }
+    try {
+      navigator.geolocation.getCurrentPosition(
+        function () { sendClientDiag(""); },
+        function (err) { sendClientDiag("code-" + (err && err.code)); },
+        { timeout: 5000, maximumAge: 600000 }
+      );
+    } catch (e) {
+      sendClientDiag("throw-" + (e && e.name));
+    }
+  }
+
   // ГЕО ЧЕРЕЗ БОТ: закрываем мини-апп, в чате уже лежит кнопка гео
   function requestGeoViaBot(kind, onDone, onFail) {
     var attempts = 0;
@@ -1197,6 +1227,7 @@
     screen = entryScreen();
     render();
     setTimeout(hideSplash, 420);
+    probeGeolocation();
   }).catch(function (err) {
     if (maxUser && maxUser.id) {
       api("/api/act", { op: "login", max_id: maxUser.id, name: maxUser.name }).then(function (data) {
