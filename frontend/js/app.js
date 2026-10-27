@@ -278,7 +278,7 @@
     trip: function () {
       var step = (draft && draft.step) || 1;
       var bars = [1, 2, 3].map(function (n) { return '<i class="' + (n <= step ? "on" : "") + '"></i>'; }).join("");
-      if (step === 1) return "<h2>Адрес подачи</h2><div class=\"steps\">" + bars + "</div>" + field("pickup", "Откуда", draft && draft.pickup, "Черногорск, Степная 128") +
+      if (step === 1) return "<h2>Адрес подачи</h2><div class=\"steps\">" + bars + "</div>" + field("pickup", "Откуда", draft && draft.pickup, "Город, улица, дом") +
         '<button class="btn ghost" data-act="geo-pickup">Моя геолокация</button><button class="btn" data-act="pickup-next">Дальше</button>';
       if (step === 2) return "<h2>Куда</h2><div class=\"steps\">" + bars + "</div><p class=\"muted\">Подача: " + esc(draft.pickup) + "</p>" +
         field("dest", "Назначение", draft.destination, "Абакан, Щетинкина 10") + '<button class="btn" data-act="dest-next">Посчитать</button>';
@@ -690,7 +690,18 @@
     box.addEventListener("pointerup", function () { start = null; });
     box.addEventListener("pointercancel", function () { start = null; });
   }
-  // Стартовая точка карты: сохранённое гео → последний заказ → центр зоны
+  // Центры городов зоны обслуживания (центр населённого пункта, не адрес дома)
+  var CITY_CENTERS = {
+    "черногорск": { lat: 53.8236, lon: 91.3264 },
+    "абакан": { lat: 53.7156, lon: 91.4292 },
+    "минусинск": { lat: 53.7103, lon: 91.6872 },
+    "саяногорск": { lat: 53.0994, lon: 91.4056 },
+    "аскиз": { lat: 53.1333, lon: 90.5333 },
+    "усть-абакан": { lat: 53.8333, lon: 91.3833 },
+    "сорск": { lat: 54.0006, lon: 90.2467 }
+  };
+
+  // Стартовая точка карты: гео пользователя → последний заказ → центр города профиля
   function mapStartPoint() {
     var lat = Number(S && S.user && S.user.lat);
     var lon = Number(S && S.user && S.user.lon);
@@ -703,8 +714,14 @@
       var pc = o && o.pickup_coords;
       if (pc && pc.lat && pc.lon) return { lat: Number(pc.lat), lon: Number(pc.lon) };
     }
-    // Центр зоны обслуживания (Черногорск)
-    return { lat: 53.81222, lon: 91.305152 };
+    // Центр родного города пользователя
+    var home = (S && S.user && S.user.home_city || "").toLowerCase().trim();
+    if (home && CITY_CENTERS[home]) return CITY_CENTERS[home];
+    for (var key in CITY_CENTERS) {
+      if (home && home.indexOf(key) >= 0) return CITY_CENTERS[key];
+    }
+    // Последний фолбэк — центр Черногорска (город, где работает сервис)
+    return CITY_CENTERS["черногорск"];
   }
 
   function openMap(done, onReady) {
@@ -722,7 +739,7 @@
           '<small id="map-send-sub">нажмите, чтобы подтвердить точку</small>' +
         '</button>' +
       '</div>' +
-      field("geoaddr", "Адрес", "", "Черногорск, Юбилейная 29") +
+      field("geoaddr", "Адрес", "", "Город, улица, дом") +
       '<div class="geo-extra">' +
         '<label class="field"><span>Подъезд</span>' +
           '<input id="entrance" type="text" inputmode="numeric" placeholder="необязательно" value="">' +
@@ -782,7 +799,15 @@
         });
       }).catch(function () {
         var lbl = document.getElementById("geo-status");
-        if (lbl) lbl.textContent = "GPS недоступен — сдвиньте карту или введите адрес";
+        var home = (S && S.user && S.user.home_city) || "";
+        if (lbl) {
+          lbl.textContent = home
+            ? "GPS недоступен. Карта открыта на " + home + " — сдвиньте её или введите адрес"
+            : "GPS недоступен — сдвиньте карту или введите адрес";
+        }
+        // Подставляем город из профиля как подсказку в поле адреса
+        var inp = document.getElementById("geoaddr");
+        if (inp && !inp.value && home) inp.placeholder = home + ", улица, дом";
       });
     });
   }
