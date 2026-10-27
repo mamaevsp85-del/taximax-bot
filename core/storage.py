@@ -216,8 +216,12 @@ class Storage:
     def get_active_role(self, user_id: int) -> str:
         u = self.users.get(int(user_id), {})
         active = u.get("active_role", ROLE_PASSENGER)
-        if active not in self.compute_roles(user_id):
+        roles = self.compute_roles(user_id)
+        if active not in roles:
             active = ROLE_PASSENGER
+        # Admins default to admin role (unless passenger_removed is explicitly False)
+        if ROLE_ADMIN in roles and active == ROLE_PASSENGER:
+            active = ROLE_ADMIN
         return active
 
     def set_active_role(self, user_id: int, role: str) -> bool:
