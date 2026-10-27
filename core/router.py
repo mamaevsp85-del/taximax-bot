@@ -140,6 +140,35 @@ class Router:
         from max_api.models import Update, User
         return Update(update_type="menu_open", timestamp=0, user=User(user_id=user_id))
 
+    async def _handle_miniapp_geo(self, user_id: int, loc) -> None:
+        """Точка из чата для мини-приложения: сохраняем и подтверждаем."""
+        from datetime import datetime as _dt
+
+        from core.geocoder import get_address_by_coordinates
+        from ui.reply import Reply
+
+        lat, lon = float(loc.latitude), float(loc.longitude)
+        address, city = await get_address_by_coordinates(lat, lon)
+        if not address:
+            address = f"{lat:.5f}, {lon:.5f}"
+
+        storage.storage.complete_geo_request(user_id, lat, lon, address, city)
+
+        now = _dt.now().isoformat()
+        storage.storage.update_user(
+            user_id,
+            last_location={"lat": lat, "lon": lon, "address": address,
+                           "city": city or "", "updated_at": now},
+            current_city=city or "",
+            last_lat=lat, last_lon=lon, last_location_at=now,
+        )
+
+        await Reply(self.client, user_id, edit_last=False, track_menu=False).send(
+            f"📍 <b>Адрес принят</b>\n\n{address}\n\n"
+            "Вернитесь в приложение — точка уже подставлена."
+        )
+        logger.info("Мини-апп гео для %s: %.5f,%.5f -> %s", user_id, lat, lon, address)
+
     async def _handle_callback(self, user_id: int, update: Update) -> None:
         payload = update.callback.payload or ""
         fn = self.callback_handlers.get(payload)
@@ -167,6 +196,13 @@ class Router:
         text = (update.message.text or "").strip() if update.message else ""
         logger.info("_handle_message user=%s text=%r has_message=%s",
                     user_id, text, update.message is not None)
+
+        # Гео, запрошенное мини-приложением: бот принимает точку из чата
+        loc = getattr(update.message, "location", None) if update.message else None
+        if loc and loc.latitude is not None and loc.longitude is not None:
+            if storage.storage.has_pending_geo_request(user_id):
+                await self._handle_miniapp_geo(user_id, loc)
+                return
 
         if text.startswith("/"):
             cmd = text.split()[0].lower().lstrip("/").split("@")[0]

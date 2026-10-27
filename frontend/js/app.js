@@ -199,9 +199,9 @@
     return "home";
   }
 
-  // Первый вход: профиль не заполнен — показываем знакомство
+  // Знакомство — ровно один раз при первом входе
   function needOnboarding() {
-    return !!(S && S.user && S.user.profile_complete === false);
+    return !!(S && S.user && S.user.needs_onboarding === true);
   }
 
   function entryScreen() {
@@ -754,60 +754,53 @@
     bindMap();
     if (typeof onReady === "function") onReady(mapDraft);
   }
-  function devicePoint() {
-    return new Promise(function (resolve, reject) {
-      if (!navigator.geolocation) { reject(new Error("no-geo-api")); return; }
-      var done = false;
-      var timer = setTimeout(function () {
-        if (!done) { done = true; reject(new Error("timeout")); }
-      }, 9000);
-      try {
-        navigator.geolocation.getCurrentPosition(function (pos) {
-          if (done) return;
-          done = true; clearTimeout(timer);
-          resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude });
-        }, function (err) {
-          if (done) return;
-          done = true; clearTimeout(timer);
-          reject(err || new Error("denied"));
-        }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
-      } catch (e) {
-        if (!done) { done = true; clearTimeout(timer); reject(e); }
-      }
+
+  // Гео через бота: просим прислать кнопку в чат и ждём точку
+  function requestGeoViaBot(kind, onDone, onFail) {
+    var attempts = 0;
+    var maxAttempts = 40;  // ~2 минуты
+
+    api("/api/act", { op: "geo.request", kind: kind || "pickup" }).then(function () {
+      var timer = setInterval(function () {
+        attempts++;
+        if (attempts > maxAttempts) {
+          clearInterval(timer);
+          if (onFail) onFail();
+          return;
+        }
+        api("/api/act", { op: "geo.poll" }).then(function (res) {
+          if (res.status === "done") {
+            clearInterval(timer);
+            api("/api/act", { op: "geo.cancel" }).catch(function () {});
+            onDone({ lat: res.lat, lon: res.lon, address: res.address || "" });
+          } else if (res.status === "expired" || res.status === "none") {
+            clearInterval(timer);
+            if (onFail) onFail();
+          }
+        }).catch(function () {});
+      }, 3000);
+    }).catch(function () {
+      if (onFail) onFail();
     });
   }
-
-  // Открывает карту сразу, центрируя её на гео (или на последней точке)
+  // Открывает карту и сразу запрашивает гео через бота
   function needPoint(done) {
-    toast("Определяю ваше место…");
-    // Карта открывается сразу — как в боте, не дожидаясь ответа GPS
     openMap(done, function (map) {
-      devicePoint().then(function (p) {
-        map.lat = p.lat;
-        map.lon = p.lon;
-        mapDraft = { lat: p.lat, lon: p.lon };
+      var lbl = document.getElementById("geo-status");
+      if (lbl) lbl.textContent = "Запросили гео у бота — отправьте точку в чате…";
+      requestGeoViaBot("pickup", function (p) {
+        mapDraft = { lat: p.lat, lon: p.lon, address: p.address };
         paintMap();
-        api("/api/act", { op: "geo.resolve", lat: p.lat, lon: p.lon }).then(function (res) {
-          mapDraft.address = res.address;
-          var inp = document.getElementById("geoaddr");
-          if (inp && res.address) inp.value = res.address;
-          var lbl = document.getElementById("geo-status");
-          if (lbl) lbl.textContent = res.address || "Место определено";
-        }).catch(function () {
-          var lbl = document.getElementById("geo-status");
-          if (lbl) lbl.textContent = "Место определено по GPS";
-        });
-      }).catch(function () {
-        var lbl = document.getElementById("geo-status");
+        var inp = document.getElementById("geoaddr");
+        if (inp && p.address) inp.value = p.address;
+        if (lbl) lbl.textContent = p.address || "Место определено";
+      }, function () {
         var home = (S && S.user && S.user.home_city) || "";
         if (lbl) {
           lbl.textContent = home
-            ? "GPS недоступен. Карта открыта на " + home + " — сдвиньте её или введите адрес"
-            : "GPS недоступен — сдвиньте карту или введите адрес";
+            ? "Карта открыта на " + home + " — сдвиньте её или введите адрес"
+            : "Сдвиньте карту или введите адрес";
         }
-        // Подставляем город из профиля как подсказку в поле адреса
-        var inp = document.getElementById("geoaddr");
-        if (inp && !inp.value && home) inp.placeholder = home + ", улица, дом";
       });
     });
   }
@@ -1018,12 +1011,15 @@
       needPoint(function (p) { run({ op: "driver.geo", lat: p.lat, lon: p.lon }); });
     },
     "geo-pickup": function () {
-      needPoint(function (p) {
+      toast("Отправьте гео в чат с ботом…");
+      requestGeoViaBot("pickup", function (p) {
         var input = document.getElementById("pickup");
         if (input) input.value = p.address || (p.lat.toFixed(5) + ", " + p.lon.toFixed(5));
-        // Запоминаем координаты, чтобы не геокодировать повторно
         draft.pickup_coords = { lat: p.lat, lon: p.lon };
         if (p.address) draft.pickup = p.address;
+        toast("Адрес получен");
+      }, function () {
+        toast("Не дождались гео. Откройте чат с ботом и отправьте локацию");
       });
     },
     "map-find": function () {
@@ -1042,21 +1038,16 @@
     },
     "map-gps": function () {
       var lbl = document.getElementById("geo-status");
-      if (lbl) lbl.textContent = "Определяю координаты…";
-      devicePoint().then(function (p) {
-        mapDraft = { lat: p.lat, lon: p.lon };
+      if (lbl) lbl.textContent = "Отправьте гео в чат с ботом…";
+      requestGeoViaBot("pickup", function (p) {
+        mapDraft = { lat: p.lat, lon: p.lon, address: p.address };
         paintMap();
-        api("/api/act", { op: "geo.resolve", lat: p.lat, lon: p.lon }).then(function (res) {
-          mapDraft.address = res.address;
-          var inp = document.getElementById("geoaddr");
-          if (inp && res.address) inp.value = res.address;
-          if (lbl) lbl.textContent = res.address || "Место определено";
-        }).catch(function () {
-          if (lbl) lbl.textContent = "Место определено по GPS";
-        });
-      }).catch(function () {
-        toast("GPS недоступен");
-        if (lbl) lbl.textContent = "GPS недоступен — введите адрес";
+        var inp = document.getElementById("geoaddr");
+        if (inp && p.address) inp.value = p.address;
+        if (lbl) lbl.textContent = p.address || "Место определено";
+      }, function () {
+        if (lbl) lbl.textContent = "Гео не получено — введите адрес или сдвиньте карту";
+        toast("Откройте чат с ботом и отправьте локацию");
       });
     },
     "map-ok": function () {

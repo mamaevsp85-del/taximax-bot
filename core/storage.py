@@ -468,6 +468,73 @@ class Storage:
     def get_order(self, order_id: int) -> dict:
         return self.orders.get(int(order_id), {})
 
+    # ==================== ГЕО-ЗАПРОСЫ ИЗ МИНИ-ПРИЛОЖЕНИЯ ====================
+    def set_geo_request(self, user_id: int, kind: str = "pickup",
+                        ttl_minutes: int = 10) -> Dict[str, Any]:
+        """Создаёт запрос гео: мини-апп просит бота прислать кнопку в чат."""
+        uid = int(user_id)
+        req = {
+            "kind": kind,
+            "status": "pending",
+            "created_at": datetime.now().isoformat(),
+            "expires_at": (datetime.now() + timedelta(minutes=ttl_minutes)).isoformat(),
+            "lat": None, "lon": None, "address": "", "city": "",
+        }
+        with self._lock:
+            self.admin_data.setdefault("geo_requests", {})[str(uid)] = req
+            self.save()
+        return req
+
+    def get_geo_request(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Текущий гео-запрос пользователя (или None)."""
+        req = (self.admin_data.get("geo_requests") or {}).get(str(int(user_id)))
+        if not req:
+            return None
+        exp = req.get("expires_at")
+        if exp and req.get("status") == "pending":
+            try:
+                if datetime.now() > datetime.fromisoformat(exp):
+                    req["status"] = "expired"
+                    self.save()
+            except Exception:
+                pass
+        return req
+
+    def has_pending_geo_request(self, user_id: int) -> bool:
+        req = self.get_geo_request(user_id)
+        return bool(req and req.get("status") == "pending")
+
+    def complete_geo_request(self, user_id: int, lat: float, lon: float,
+                             address: str = "", city: str = "") -> None:
+        """Бот получил гео из чата — сохраняем для мини-приложения."""
+        uid = str(int(user_id))
+        with self._lock:
+            req = (self.admin_data.get("geo_requests") or {}).get(uid)
+            if not req:
+                return
+            req.update({
+                "status": "done", "lat": float(lat), "lon": float(lon),
+                "address": address or "", "city": city or "",
+                "done_at": datetime.now().isoformat(),
+            })
+            self.save()
+
+    def clear_geo_request(self, user_id: int) -> None:
+        uid = str(int(user_id))
+        with self._lock:
+            reqs = self.admin_data.get("geo_requests") or {}
+            if uid in reqs:
+                reqs.pop(uid, None)
+                self.save()
+
+    def mark_onboarded(self, user_id: int) -> None:
+        """Пользователь прошёл знакомство — больше не спрашиваем."""
+        with self._lock:
+            u = self.users.get(int(user_id))
+            if u is not None:
+                u["onboarded"] = True
+                self.save()
+
     # ==================== РЕЛЕЙ-СЕССИИ (персистентные) ====================
     def set_relay_session(self, user_id: int, partner_id: int, order_id: int,
                           hours: float = 24.0) -> None:

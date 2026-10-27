@@ -143,6 +143,17 @@ def _profile_complete(user: dict) -> bool:
     return bool(name and len(phone) >= 10 and city)
 
 
+def _needs_onboarding(user: dict) -> bool:
+    """Знакомство показываем ровно один раз.
+
+    Если пользователь уже проходил его (флаг onboarded) — больше не спрашиваем,
+    даже если какие-то поля пустые: он сам может дозаполнить в профиле.
+    """
+    if user.get("onboarded"):
+        return False
+    return not _profile_complete(user)
+
+
 def user_card(uid: int) -> dict:
     u = S.get_user(uid) or {}
     return {
@@ -151,6 +162,8 @@ def user_card(uid: int) -> dict:
         "phone": u.get("phone") or "",
         "home_city": u.get("home_city") or "",
         "profile_complete": _profile_complete(u),
+        "onboarded": bool(u.get("onboarded")),
+        "needs_onboarding": _needs_onboarding(u),
         "rating": u.get("rating", 5),
         "roles": S.compute_roles(uid),
         "role": S.get_active_role(uid),
@@ -381,6 +394,37 @@ def quote(pickup: str, dest: str, stop: str = "",
     return run(work())
 
 
+def _send_geo_prompt(user_id: int, kind: str = "pickup") -> None:
+    """Бот присылает в чат кнопку «Отправить геолокацию» (нативная MAX)."""
+    import threading
+
+    def worker():
+        try:
+            asyncio.run(_geo_prompt_async(user_id, kind))
+        except Exception as exc:
+            logger.warning("Не удалось отправить гео-кнопку %s: %s", user_id, exc)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+async def _geo_prompt_async(user_id: int, kind: str) -> None:
+    from max_api.client import MaxClient
+    from max_api.keyboards import inline_keyboard, keyboard_attachment, request_geo_location_button
+
+    label = "точку подачи" if kind == "pickup" else "точку назначения"
+    client = MaxClient()
+    try:
+        await client.send_message(
+            user_id=user_id,
+            text=(f"📍 <b>Отправьте {label}</b>\n\n"
+                  "Нажмите кнопку ниже — приложение подхватит адрес автоматически."),
+            attachments=keyboard_attachment(
+                [[request_geo_location_button("📍 Отправить геолокацию", quick=True)]]),
+        )
+    finally:
+        await client.close()
+
+
 def _coords_or_none(value) -> dict | None:
     """Приводит координаты к {'lat': float, 'lon': float} или None."""
     if not isinstance(value, dict):
@@ -579,6 +623,35 @@ def act(uid: int, body: dict) -> dict:
         if user_id not in S.users:
             raise ValueError("Пользователь не найден")
         return {"ok": True, "user_id": user_id}
+    if op == "geo.request":
+        # Мини-апп просит бота прислать кнопку гео в чат
+        if not uid:
+            raise PermissionError("Сначала выберите профиль")
+        kind = body.get("kind") or "pickup"
+        req = S.set_geo_request(uid, kind=kind, ttl_minutes=10)
+        _send_geo_prompt(uid, kind)
+        return {"ok": True, "geo": req}
+
+    if op == "geo.poll":
+        # Мини-апп проверяет, прислал ли пользователь точку в чат
+        if not uid:
+            raise PermissionError("Сначала выберите профиль")
+        req = S.get_geo_request(uid)
+        if not req:
+            return {"ok": True, "status": "none"}
+        if req.get("status") == "done":
+            return {"ok": True, "status": "done",
+                    "lat": req.get("lat"), "lon": req.get("lon"),
+                    "address": req.get("address") or "",
+                    "city": req.get("city") or ""}
+        return {"ok": True, "status": req.get("status") or "pending"}
+
+    if op == "geo.cancel":
+        if not uid:
+            raise PermissionError("Сначала выберите профиль")
+        S.clear_geo_request(uid)
+        return {"ok": True}
+
     if op == "geo.resolve":
         # Геокодинг не требует авторизации
         if body.get("address"):
@@ -615,7 +688,12 @@ def act(uid: int, body: dict) -> dict:
         if fields:
             S.update_user(uid, **fields)
         u = S.get_user(uid) or {}
-        return {"ok": True, "profile_complete": _profile_complete(u)}
+        # Если профиль заполнен — знакомство больше не показываем
+        if _profile_complete(u):
+            S.mark_onboarded(uid)
+            u = S.get_user(uid) or {}
+        return {"ok": True, "profile_complete": _profile_complete(u),
+                "needs_onboarding": _needs_onboarding(u)}
     if op == "quote":
         return {"ok": True, "draft": quote(
             body.get("pickup", ""), body.get("destination", ""),
@@ -624,9 +702,9 @@ def act(uid: int, body: dict) -> dict:
             dest_coords=body.get("dest_coords") or body.get("destination_coords"),
         )}
     if op == "order.create":
-        # Без заполненного профиля заказ создать нельзя
+        # Заказ нельзя создать, пока не пройдено знакомство
         u = S.get_user(uid) or {}
-        if not _profile_complete(u):
+        if _needs_onboarding(u):
             raise ValueError("Заполните профиль: имя, телефон и город")
         draft = body.get("draft") or {}
         if not draft.get("pickup_coords"):
