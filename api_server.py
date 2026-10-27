@@ -394,31 +394,12 @@ async def users_status(request):
         logger.exception("User status error")
         return web.json_response({'error': str(exc)}, status=500)
 
-    uid = 0
-    # Try to get uid from cookie
-    cookie = request.cookies.get('mx')
-    if cookie:
-        try:
-            uid = int(cookie)
-        except ValueError:
-            pass
-    if not uid:
-        # Try from query
-        uid = int(request.query.get('uid', 0))
-    if not uid:
-        return web.json_response({'ok': False, 'error': 'Not authenticated'}, status=401)
-    try:
-        state = state_for(uid)
-        return web.json_response(state)
-    except Exception as exc:
-        logger.exception("State error")
-        return web.json_response({'error': str(exc)}, status=500)
-
 
 async def api_act(request):
     if not HAS_MAXIMUS:
         return web.json_response({'error': 'MaximusTaxi not available'}, status=503)
     uid = 0
+    # Try cookie first
     cookie = request.cookies.get('mx')
     if cookie:
         try:
@@ -429,6 +410,9 @@ async def api_act(request):
         data = await request.json()
     except Exception:
         data = {}
+    # Also check body for user_id or uid
+    if not uid:
+        uid = int(data.get('user_id') or data.get('uid') or data.get('max_id') or 0)
     if data.get('op') == 'login' and data.get('max_id'):
         data['user_id'] = int(data['max_id'])
         if data.get('name'):
@@ -449,7 +433,7 @@ async def api_act(request):
         cookie_user = result.get('user_id') if data.get('op') == 'login' else None
         resp = web.json_response(result)
         if cookie_user:
-            resp.set_cookie('mx', str(cookie_user), max_age=30*24*3600)
+            resp.set_cookie('mx', str(cookie_user), max_age=30*24*3600, path='/')
         return resp
     except PermissionError as exc:
         return web.json_response({'ok': False, 'error': str(exc)}, status=403)
