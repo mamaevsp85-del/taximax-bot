@@ -281,7 +281,7 @@
       if (step === 1) return "<h2>Адрес подачи</h2><div class=\"steps\">" + bars + "</div>" + field("pickup", "Откуда", draft && draft.pickup, "Город, улица, дом") +
         '<button class="btn ghost" data-act="geo-pickup">Моя геолокация</button><button class="btn" data-act="pickup-next">Дальше</button>';
       if (step === 2) return "<h2>Куда</h2><div class=\"steps\">" + bars + "</div><p class=\"muted\">Подача: " + esc(draft.pickup) + "</p>" +
-        field("dest", "Назначение", draft.destination, "Абакан, Щетинкина 10") + '<button class="btn" data-act="dest-next">Посчитать</button>';
+        field("dest", "Назначение", draft.destination, "Город, улица, дом") + '<button class="btn" data-act="dest-next">Посчитать</button>';
       if (draft.pending) return "<h2>Подтверждение</h2><div class=\"steps\">" + bars + "</div><div class=\"card\" style=\"margin-top:0\"><div class=\"route\">" +
         esc(draft.pickup) + "<small>" + esc(draft.destination) + "</small></div><p class=\"muted\">Считаю маршрут…</p></div>";
       return "<h2>Подтверждение</h2><div class=\"steps\">" + bars + "</div><div class=\"card\" style=\"margin-top:0\"><div class=\"route\">" +
@@ -350,21 +350,21 @@
       if (step === 1) {
         return head +
           '<h2>Как вас зовут?</h2>' +
-          field("onb_name", "Имя", u.name || "", "Сергей") +
+          field("onb_name", "Имя", u.name || "", "Например, Александр") +
           '<button class="btn" data-act="onb-next">Далее</button>';
       }
       if (step === 2) {
         return head +
           '<h2>Ваш телефон</h2>' +
           '<p class="muted">Нужен, чтобы водитель мог связаться с вами.</p>' +
-          field("onb_phone", "Телефон", u.phone || "", "+7 913 443-04-04") +
+          field("onb_phone", "Телефон", u.phone || "", "+7 900 000-00-00") +
           '<button class="btn" data-act="onb-next">Далее</button>' +
           '<button class="btn ghost" data-act="onb-back">Назад</button>';
       }
       return head +
         '<h2>Ваш город</h2>' +
         '<p class="muted">Откуда вы обычно заказываете такси.</p>' +
-        field("onb_city", "Город", u.home_city || "", "Черногорск") +
+        field("onb_city", "Город", u.home_city || "", "Например, Абакан") +
         '<button class="btn" data-act="onb-finish">Готово, поехали</button>' +
         '<button class="btn ghost" data-act="onb-back">Назад</button>';
     },
@@ -581,12 +581,12 @@
     "a-managers": function () {
       return "<h2>Менеджеры</h2>" + (S.admin.managers || []).map(function (id) {
         return row("id " + id, "убрать", "adm", { op: "admin.manager.remove", id: id });
-      }).join("") + field("mid", "ID пользователя", "", "16155678") + '<button class="btn" data-act="add-manager">Добавить</button>';
+      }).join("") + field("mid", "ID пользователя", "", "например, 123456789") + '<button class="btn" data-act="add-manager">Добавить</button>';
     },
     "a-admins": function () {
       return "<h2>Админы</h2>" + (S.admin.admins || []).map(function (id) {
         return row("id " + id, "убрать", "adm", { op: "admin.admin.remove", id: id });
-      }).join("") + field("aphone", "Телефон", "", "79990001122") + '<button class="btn" data-act="add-admin">Добавить по телефону</button>';
+      }).join("") + field("aphone", "Телефон", "", "+7 900 000-00-00") + '<button class="btn" data-act="add-admin">Добавить по телефону</button>';
     },
     "a-settings": function () {
       return "<h2>Настройки</h2><p class=\"muted\">Балансы у водителей: " + (S.admin.balances_disabled ? "скрыты" : "показаны") + "</p>" +
@@ -979,7 +979,7 @@
       sheet("<h2>Профиль</h2>" +
         field("pname", "Имя", S.user.name, "") +
         field("pphone", "Телефон", S.user.phone, "") +
-        field("pcity", "Город", S.user.home_city, "Черногорск") +
+        field("pcity", "Город", S.user.home_city, "Например, Абакан") +
         '<button class="btn" data-act="save-profile">Сохранить</button>');
     },
     "save-profile": function () {
