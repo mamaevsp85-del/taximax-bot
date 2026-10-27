@@ -101,6 +101,8 @@ def brief_order(o: dict) -> dict:
         "driver_id": o.get("driver_id"),
         "pickup": o.get("pickup") or "",
         "destination": o.get("destination") or "",
+        "pickup_coords": o.get("pickup_coords"),
+        "destination_coords": o.get("destination_coords"),
         "price": o.get("final_price") or o.get("price") or 0,
         "distance": o.get("distance") or 0,
         "time_minutes": o.get("time_minutes") or 0,

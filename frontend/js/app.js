@@ -597,7 +597,7 @@
     var tiles = document.getElementById("pick-tiles");
     if (!box || !tiles || !mapDraft) return;
     var w = box.clientWidth || 320;
-    var h = box.clientHeight || 240;
+    var h = box.clientHeight || 260;
     var c = mapWorld(mapDraft.lat, mapDraft.lon);
     var left = c.x * 256 - w / 2;
     var top = c.y * 256 - h / 2;
@@ -611,14 +611,21 @@
       for (var y = y0; y <= y1; y++) {
         if (y < 0 || y >= max) continue;
         var xx = ((x % max) + max) % max;
-        // Яндекс-тайлы: работают в РФ без блокировок
-        html += '<img alt="" loading="lazy" src="https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=21.09.17&x=' +
-          xx + "&y=" + y + "&z=" + MAP_Z + "&scale=1&lang=ru_RU\" style=\"left:" +
-          (x * 256 - left) + "px;top:" + (y * 256 - top) + 'px" onerror="this.style.display=\'none\'">';
+        var pos = "left:" + (x * 256 - left) + "px;top:" + (y * 256 - top) + "px";
+        // OSM — основной источник (работает стабильно)
+        html += '<img alt="" src="https://tile.openstreetmap.org/' + MAP_Z + "/" + xx + "/" + y +
+          '.png" style="' + pos + '" data-fb="1" onerror="mapTileFallback(this)">';
       }
     }
     tiles.innerHTML = html;
   }
+
+  // Фолбэк: если OSM не загрузился, пробуем зеркало
+  window.mapTileFallback = function (img) {
+    if (img.dataset.fb === "2") { img.style.opacity = "0"; return; }
+    img.dataset.fb = "2";
+    img.src = img.src.replace("tile.openstreetmap.org", "a.tile.openstreetmap.fr/osmfr");
+  };
   function bindMap() {
     var box = document.getElementById("pick-map");
     if (!box) return;
@@ -636,21 +643,44 @@
     box.addEventListener("pointerup", function () { start = null; });
     box.addEventListener("pointercancel", function () { start = null; });
   }
-  function openMap(done) {
+  // Стартовая точка карты: сохранённое гео → последний заказ → центр зоны
+  function mapStartPoint() {
+    var lat = Number(S && S.user && S.user.lat);
+    var lon = Number(S && S.user && S.user.lon);
+    if (lat && lon && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+      return { lat: lat, lon: lon };
+    }
+    var orders = (S && S.passenger && S.passenger.orders) || [];
+    for (var i = 0; i < orders.length; i++) {
+      var o = orders[i];
+      var pc = o && o.pickup_coords;
+      if (pc && pc.lat && pc.lon) return { lat: Number(pc.lat), lon: Number(pc.lon) };
+    }
+    // Центр зоны обслуживания (Черногорск)
+    return { lat: 53.81222, lon: 91.305152 };
+  }
+
+  function openMap(done, onReady) {
     mapDone = done;
-    mapDraft = {
-      lat: Number(S && S.user && S.user.lat) || 53.827,
-      lon: Number(S && S.user && S.user.lon) || 91.306
-    };
-    sheet('<h2>Точка на карте</h2>' +
-      '<p class="muted">Сдвиньте карту — булавка в центре показывает выбранную точку. ' +
-      'Или введите адрес текстом.</p>' +
-      '<div class="pick-map" id="pick-map"><div class="pick-tiles" id="pick-tiles"></div><div class="pick-pin"></div></div>' +
+    var start = mapStartPoint();
+    mapDraft = { lat: start.lat, lon: start.lon };
+
+    sheet('<h2>Ваше местоположение</h2>' +
+      '<p class="muted" id="geo-status">Определяю координаты…</p>' +
+      '<div class="pick-map" id="pick-map">' +
+        '<div class="pick-tiles" id="pick-tiles"></div>' +
+        '<div class="pick-pin"></div>' +
+      '</div>' +
       field("geoaddr", "Адрес", "", "Черногорск, Юбилейная 29") +
-      '<button class="btn ghost" data-act="map-find">Найти по адресу</button>' +
-      '<button class="btn" data-act="map-ok">Это место</button>');
+      '<div class="btn-row">' +
+        '<button class="btn ghost" data-act="map-find">Найти адрес</button>' +
+        '<button class="btn ghost" data-act="map-gps">Моё место</button>' +
+      '</div>' +
+      '<button class="btn" data-act="map-ok">Отправить гео</button>');
+
     paintMap();
     bindMap();
+    if (typeof onReady === "function") onReady(mapDraft);
   }
   function devicePoint() {
     return new Promise(function (resolve, reject) {
@@ -658,7 +688,7 @@
       var done = false;
       var timer = setTimeout(function () {
         if (!done) { done = true; reject(new Error("timeout")); }
-      }, 12000);
+      }, 9000);
       try {
         navigator.geolocation.getCurrentPosition(function (pos) {
           if (done) return;
@@ -668,27 +698,37 @@
           if (done) return;
           done = true; clearTimeout(timer);
           reject(err || new Error("denied"));
-        }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+        }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
       } catch (e) {
         if (!done) { done = true; clearTimeout(timer); reject(e); }
       }
     });
   }
 
+  // Открывает карту сразу, центрируя её на гео (или на последней точке)
   function needPoint(done) {
-    toast("Запрашиваю гео…");
-    devicePoint().then(function (p) {
-      api("/api/act", { op: "geo.resolve", lat: p.lat, lon: p.lon }).then(function (res) {
-        done({ lat: res.lat, lon: res.lon, address: res.address });
+    toast("Определяю ваше место…");
+    // Карта открывается сразу — как в боте, не дожидаясь ответа GPS
+    openMap(done, function (map) {
+      devicePoint().then(function (p) {
+        map.lat = p.lat;
+        map.lon = p.lon;
+        mapDraft = { lat: p.lat, lon: p.lon };
+        paintMap();
+        api("/api/act", { op: "geo.resolve", lat: p.lat, lon: p.lon }).then(function (res) {
+          mapDraft.address = res.address;
+          var inp = document.getElementById("geoaddr");
+          if (inp && res.address) inp.value = res.address;
+          var lbl = document.getElementById("geo-status");
+          if (lbl) lbl.textContent = res.address || "Место определено";
+        }).catch(function () {
+          var lbl = document.getElementById("geo-status");
+          if (lbl) lbl.textContent = "Место определено по GPS";
+        });
       }).catch(function () {
-        done({ lat: p.lat, lon: p.lon, address: "" });
+        var lbl = document.getElementById("geo-status");
+        if (lbl) lbl.textContent = "GPS недоступен — сдвиньте карту или введите адрес";
       });
-    }).catch(function (err) {
-      // В webview MAX геолокация часто недоступна — открываем карту
-      var msg = (err && err.code === 1) ? "Гео запрещено. Выберите точку на карте"
-              : "Гео недоступно. Выберите точку на карте";
-      toast(msg);
-      openMap(done);
     });
   }
 
@@ -838,21 +878,59 @@
     "map-find": function () {
       var q = val("geoaddr");
       if (!q) { toast("Введите адрес"); return; }
+      var lbl = document.getElementById("geo-status");
+      if (lbl) lbl.textContent = "Ищу адрес…";
       api("/api/act", { op: "geo.resolve", address: q }).then(function (res) {
         mapDraft = { lat: res.lat, lon: res.lon, address: res.address };
         paintMap();
-      }).catch(function (e) { toast(e.message); });
+        if (lbl) lbl.textContent = res.address || q;
+      }).catch(function (e) {
+        toast(e.message);
+        if (lbl) lbl.textContent = "Адрес не найден";
+      });
+    },
+    "map-gps": function () {
+      var lbl = document.getElementById("geo-status");
+      if (lbl) lbl.textContent = "Определяю координаты…";
+      devicePoint().then(function (p) {
+        mapDraft = { lat: p.lat, lon: p.lon };
+        paintMap();
+        api("/api/act", { op: "geo.resolve", lat: p.lat, lon: p.lon }).then(function (res) {
+          mapDraft.address = res.address;
+          var inp = document.getElementById("geoaddr");
+          if (inp && res.address) inp.value = res.address;
+          if (lbl) lbl.textContent = res.address || "Место определено";
+        }).catch(function () {
+          if (lbl) lbl.textContent = "Место определено по GPS";
+        });
+      }).catch(function () {
+        toast("GPS недоступен");
+        if (lbl) lbl.textContent = "GPS недоступен — введите адрес";
+      });
     },
     "map-ok": function () {
       if (!mapDraft || !mapDone) return;
       var done = mapDone;
-      api("/api/act", { op: "geo.resolve", lat: mapDraft.lat, lon: mapDraft.lon }).then(function (res) {
+      var typed = val("geoaddr");
+      var finish = function (lat, lon, address) {
         closeSheet();
-        done({ lat: res.lat, lon: res.lon, address: res.address });
-      }).catch(function () {
-        closeSheet();
-        done({ lat: mapDraft.lat, lon: mapDraft.lon, address: "" });
-      });
+        mapDone = null;
+        done({ lat: lat, lon: lon, address: address || "" });
+      };
+      // Если пользователь ввёл адрес — уважаем его
+      if (typed && typed !== mapDraft.address) {
+        api("/api/act", { op: "geo.resolve", address: typed }).then(function (res) {
+          finish(res.lat, res.lon, res.address || typed);
+        }).catch(function () {
+          api("/api/act", { op: "geo.resolve", lat: mapDraft.lat, lon: mapDraft.lon })
+            .then(function (res) { finish(res.lat, res.lon, res.address); })
+            .catch(function () { finish(mapDraft.lat, mapDraft.lon, ""); });
+        });
+        return;
+      }
+      api("/api/act", { op: "geo.resolve", lat: mapDraft.lat, lon: mapDraft.lon })
+        .then(function (res) { finish(res.lat, res.lon, res.address); })
+        .catch(function () { finish(mapDraft.lat, mapDraft.lon, mapDraft.address || ""); });
     },
     "sheet-dname": function () { sheet("<h2>Имя</h2>" + field("dval", "Новое имя", S.user.driver_name, "") + '<button class="btn" data-act="save-d" data-field="name">Сохранить</button>'); },
     "sheet-dphone": function () { sheet("<h2>Телефон</h2>" + field("dval", "Телефон", S.user.driver_phone, "") + '<button class="btn" data-act="save-d" data-field="phone">Сохранить</button>'); },
