@@ -17,18 +17,42 @@
     user: function () {
       var wa = app();
       var u = wa && wa.initDataUnsafe && wa.initDataUnsafe.user;
-      if (!u) return null;
-      var name = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
-      return {
-        id: u.id,
-        name: name || u.username || "",
-        username: u.username || "",
-        photo: u.photo_url || ""
-      };
+      if (u) {
+        var name = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
+        return {
+          id: u.id,
+          name: name || u.username || "",
+          username: u.username || "",
+          photo: u.photo_url || ""
+        };
+      }
+      // Fallback: check URL parameters
+      var params = new URLSearchParams(window.location.search);
+      var uid = params.get('uid') || params.get('user_id') || params.get('max_id');
+      if (uid) {
+        return { id: Number(uid), name: params.get('name') || '', username: '', photo: '' };
+      }
+      // Fallback: check localStorage
+      try {
+        var stored = localStorage.getItem('maximus_user');
+        if (stored) {
+          var su = JSON.parse(stored);
+          if (su && su.id) return su;
+        }
+      } catch (e) {}
+      return null;
+    },
+    storeUser: function (user) {
+      try { localStorage.setItem('maximus_user', JSON.stringify(user)); } catch (e) {}
     },
     startParam: function () {
       var wa = app();
-      return (wa && wa.initDataUnsafe && wa.initDataUnsafe.start_param) || "";
+      var sp = (wa && wa.initDataUnsafe && wa.initDataUnsafe.start_param) || "";
+      if (!sp) {
+        var params = new URLSearchParams(window.location.search);
+        sp = params.get('startapp') || params.get('start') || "";
+      }
+      return sp;
     },
     ready: function () {
       call(function (wa) {

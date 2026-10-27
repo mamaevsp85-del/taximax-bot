@@ -775,6 +775,12 @@
   window.Maximus.ready();
   var maxUser = window.Maximus.user();
   var start = window.Maximus.startParam();
+  // Also check URL parameters for uid (MAX may pass it via URL)
+  var urlParams = new URLSearchParams(window.location.search);
+  var urlUid = urlParams.get('uid') || urlParams.get('user_id') || '';
+  if (!maxUser && urlUid) {
+    maxUser = { id: Number(urlUid), name: urlParams.get('name') || '', username: '', photo: '' };
+  }
   var stateUrl = "/api/state";
   if (maxUser && maxUser.id) {
     stateUrl += "?uid=" + maxUser.id;
@@ -789,11 +795,13 @@
     }
     screen = homeOf();
     render();
-  }).catch(function () {
+  }).catch(function (err) {
     if (maxUser && maxUser.id) {
       api("/api/act", { op: "login", max_id: maxUser.id, name: maxUser.name }).then(function (data) {
-        S = data.state; screen = homeOf(); render();
-      }).catch(showPeople);
+        if (data.state) { S = data.state; if (maxUser) window.Maximus.storeUser(maxUser); screen = homeOf(); render(); }
+      }).catch(function (e2) {
+        showPeople();
+      });
       return;
     }
     showPeople();
