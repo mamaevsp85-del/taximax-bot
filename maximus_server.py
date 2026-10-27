@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 BOT = ROOT
+FRONTEND = os.path.join(ROOT, "frontend")
 DATA = os.path.join(ROOT, "data", "taxi_data.json")
 os.environ["STORAGE_FILE"] = DATA
 if BOT not in sys.path:
@@ -37,7 +38,7 @@ _GEO_CACHE: dict = {}
 _ROUTE_CACHE: dict = {}
 
 ACTIVE = ("pending", "accepted", "driver_arrived", "in_progress")
-PORT = 8765
+PORT = int(os.environ.get("MINIAPP_PORT", "8765"))
 
 
 def run(coro):
@@ -434,6 +435,7 @@ def act(uid: int, body: dict) -> dict:
             S.ensure_user(user_id, name=name)
         if user_id not in S.users:
             raise ValueError("Пользователь не найден")
+        return {"ok": True, "user_id": user_id}
     if op == "geo.resolve":
         # Геокодинг не требует авторизации
         if body.get("address"):
@@ -449,6 +451,8 @@ def act(uid: int, body: dict) -> dict:
         if not address:
             address = f"{lat:.5f}, {lon:.5f}"
         return {"ok": True, "lat": lat, "lon": lon, "address": address, "city": city or ""}
+    if not uid:
+        raise PermissionError("Сначала выберите профиль")
     if op == "role":
         role = body.get("role")
         if not S.set_active_role(uid, role):
@@ -823,8 +827,8 @@ class Handler(BaseHTTPRequestHandler):
     def serve_file(self, path: str):
         if path == "/":
             path = "/index.html"
-        safe = os.path.normpath(os.path.join(ROOT, path.lstrip("/")))
-        if not safe.startswith(ROOT) or not os.path.isfile(safe):
+        safe = os.path.normpath(os.path.join(FRONTEND, path.lstrip("/")))
+        if not safe.startswith(FRONTEND) or not os.path.isfile(safe):
             self.send_error(404)
             return
         ext = os.path.splitext(safe)[1].lower()
