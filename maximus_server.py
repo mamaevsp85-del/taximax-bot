@@ -311,10 +311,11 @@ def quote(pickup: str, dest: str, stop: str = "",
         if not city1:
             city1 = await _city_by_coords(pc["lat"], pc["lon"])
 
-        # Адрес назначения: ищем в городе подачи, если пассажир не указал другой.
-        # Иначе «Юбилейная 29» может найтись в другом регионе за тысячи км.
+        # Адрес назначения: если пассажир написал город в адресе — ищем как есть.
+        # Если город не написан — ищем в городе подачи, чтобы «Юбилейная 29»
+        # не нашлась в другом регионе за тысячи километров.
         if not dc:
-            if city1 and not _city_mentioned(dest, city1):
+            if city1 and not _city_mentioned(dest, city1) and not _has_explicit_other_city(dest, city1):
                 dc, city2 = await geo_cached(f"{dest}, {city1}")
             if not dc:
                 dc, city2 = await geo_cached(dest)
@@ -390,6 +391,30 @@ def _city_mentioned(text: str, city: str) -> bool:
     if not text or not city:
         return False
     return city.strip().lower() in text.lower()
+
+
+# Известные города зоны обслуживания — чтобы распознать явно указанный город
+KNOWN_CITIES = (
+    "абакан", "черногорск", "минусинск", "саяногорск", "аскиз",
+    "усть-абакан", "бейский", "подсинцовка", "вершина теи", "копьёво",
+    "копьево", "сорск", "шарыпово", "красноярск", "кызыл",
+)
+
+
+def _has_explicit_other_city(text: str, own_city: str) -> bool:
+    """Есть ли в адресе город, отличный от города подачи.
+
+    Нужно, чтобы «Абакан, Ленина 28» не искался как
+    «Абакан, Ленина 28, Черногорск» — иначе геокодер вернёт Черногорск.
+    """
+    if not text:
+        return False
+    low = text.lower()
+    own = (own_city or "").strip().lower()
+    for city in KNOWN_CITIES:
+        if city != own and city in low:
+            return True
+    return False
 
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

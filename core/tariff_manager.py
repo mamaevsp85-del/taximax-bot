@@ -29,10 +29,14 @@ def _default_tariff() -> Dict[str, Any]:
 
 
 def _default_intercity_tariff() -> Dict[str, Any]:
-    """Междугородний тариф по умолчанию — дороже городского."""
+    """Междугородний тариф по умолчанию — дороже городского.
+
+    Время учитывается: заезд в город (пробки, светофоры) должен
+    отражаться в цене, даже если километраж почти не вырос.
+    """
     return {
         "base_price": 150, "included_km": 5, "price_per_km": 35,
-        "price_per_minute": 0, "min_price": 300,
+        "price_per_minute": 3, "min_price": 300,
         "rounding_type": "up", "rounding_step": 10,
         "free_waiting_minutes": 5, "waiting_price_per_minute": 5,
     }

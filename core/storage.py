@@ -59,7 +59,7 @@ class Storage:
             "support_contact": settings.support_contact,
             "tariff_intercity": {
                 "base_price": 150, "included_km": 5, "price_per_km": 35,
-                "price_per_minute": 0, "min_price": 300,
+                "price_per_minute": 3, "min_price": 300,
                 "rounding_type": "up", "rounding_step": 10,
                 "free_waiting_minutes": 5, "waiting_price_per_minute": 5,
             },
