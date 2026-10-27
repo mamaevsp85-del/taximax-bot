@@ -27,6 +27,8 @@ from core.fsm import get_context
 from core import geocoder
 from core.tariff_manager import (
     calculate_trip_price,
+    is_intercity,
+    resolve_destination_city,
 )
 from core.service_area import is_city_allowed, get_allowed_preview
 from core.router import Router
@@ -337,11 +339,16 @@ def register_passenger(router: Router) -> None:
                              keyboard=[[callback_button("📍 Остановить заказ", "passenger:menu")]])
             return
 
+        # Город назначения: не делаем межгород, если пассажир его не указывал
+        dest_city = resolve_destination_city(data.get("pickup_city"), city, addr)
         price = calculate_trip_price(distance, duration,
-                                     pickup_city=data.get("pickup_city"), destination_city=city)
-        await fsm.update_data(destination=addr, destination_city=city,
+                                     pickup_city=data.get("pickup_city"),
+                                     destination_city=dest_city)
+        intercity = is_intercity(data.get("pickup_city"), dest_city)
+        await fsm.update_data(destination=addr, destination_city=dest_city,
                               destination_coords={"lat": lat, "lon": lon},
-                              distance=distance, time_minutes=duration, price=price)
+                              distance=distance, time_minutes=duration, price=price,
+                              is_intercity=intercity)
         await fsm.update_data(stage="confirm")
         await fsm.set_state(None)  # экран подтверждения управляется кнопками
         await reply.send(
@@ -349,8 +356,9 @@ def register_passenger(router: Router) -> None:
             f"📍 Подача: {data['pickup']}\n"
             f"🎯 Назначение: {addr}\n"
             f"📏 Расстояние: {distance:.1f} км\n"
-            f"⏱️ Время в пути: ~{duration} мин\n\n"
-            f"💰 <b>Стоимость: {price} руб.</b>",
+            f"⏱️ Время в пути: ~{duration} мин\n"
+            + (f"🛣 Тариф: межгород\n" if intercity else "")
+            + f"\n💰 <b>Стоимость: {price} руб.</b>",
             keyboard=[[callback_button("👍 Подтвердить заказ", "passenger:confirm_order")],
                       [callback_button("💬 Предложить свою цену", "passenger:offer_own_price")],
                       [callback_button("✏️ Редактировать адреса", "passenger:edit_addresses")],

@@ -22,7 +22,7 @@ if BOT not in sys.path:
 
 from core.storage import storage as S  # noqa: E402
 from core.storage import get_available_orders_for_driver  # noqa: E402
-from core.tariff_manager import calculate_trip_price  # noqa: E402
+from core.tariff_manager import calculate_trip_price, resolve_destination_city, _is_intercity  # noqa: E402
 from core.driver_support import (  # noqa: E402
     add_order_to_driver_queue,
     remove_order_from_driver_queue,
@@ -292,39 +292,113 @@ async def route_fast(points: list) -> tuple:
     return result
 
 
-def quote(pickup: str, dest: str, stop: str = "") -> dict:
+def quote(pickup: str, dest: str, stop: str = "",
+          pickup_coords: dict | None = None,
+          dest_coords: dict | None = None) -> dict:
     async def work():
-        jobs = [geo_cached(pickup), geo_cached(dest)]
-        if stop:
-            jobs.append(geo_cached(stop))
-        found = await asyncio.gather(*jobs)
-        pc, city1 = found[0]
-        dc, city2 = found[1]
+        # Если координаты уже известны (геолокация), используем их напрямую
+        pc = _coords_or_none(pickup_coords)
+        dc = _coords_or_none(dest_coords)
+        city1 = city2 = ""
+
+        # Сначала определяем город подачи — от него зависит поиск назначения
+        if pc is None:
+            pc, city1 = await geo_cached(pickup)
         if not pc:
             raise ValueError("Не удалось найти адрес подачи")
-        if not dc and city1:
-            dc, city2 = await geo_cached(f"{dest}, {city1}")
+        if not city1:
+            city1 = await _city_by_coords(pc["lat"], pc["lon"])
+
+        # Адрес назначения: ищем в городе подачи, если пассажир не указал другой.
+        # Иначе «Юбилейная 29» может найтись в другом регионе за тысячи км.
+        if not dc:
+            if city1 and not _city_mentioned(dest, city1):
+                dc, city2 = await geo_cached(f"{dest}, {city1}")
+            if not dc:
+                dc, city2 = await geo_cached(dest)
         if not dc:
             raise ValueError("Не удалось найти адрес назначения")
+        if not city2:
+            city2 = await _city_by_coords(dc["lat"], dc["lon"])
+
+        # Не превращаем поездку в межгород, если пассажир не указал другой город
+        dest_city = resolve_destination_city(city1, city2, dest)
+
+        # Защита: если город совпадает с подачей, но точка уехала далеко —
+        # значит геокодер нашёл одноимённую улицу в другом регионе.
+        if dest_city == city1 and city1:
+            far = _haversine(pc["lat"], pc["lon"], dc["lat"], dc["lon"])
+            if far > 300:
+                raise ValueError(
+                    f"Адрес «{dest}» найден слишком далеко ({far:.0f} км). "
+                    f"Укажите город и улицу точнее.")
+
         wps = []
         if stop:
-            sc, _ = found[2]
+            sc, _scity = await geo_cached(stop)
             if not sc:
                 raise ValueError("Не удалось найти остановку")
             wps.append({"text": stop, "lat": sc["lat"], "lon": sc["lon"]})
+
         points = [(pc["lat"], pc["lon"])] + [(w["lat"], w["lon"]) for w in wps] + [(dc["lat"], dc["lon"])]
         dist, minutes = await route_fast(points)
         if dist is None:
             raise ValueError("Не удалось построить маршрут")
-        price = calculate_trip_price(dist, minutes, pickup_city=city1, destination_city=city2)
+
+        price = calculate_trip_price(dist, minutes, pickup_city=city1,
+                                     destination_city=dest_city)
         return {
             "pickup": pickup, "destination": dest, "stop": stop,
-            "pickup_city": city1, "destination_city": city2,
+            "pickup_city": city1, "destination_city": dest_city,
             "pickup_coords": pc, "destination_coords": dc,
             "waypoints": wps, "km": round(float(dist), 1),
             "minutes": int(minutes or 0), "price": price,
+            "is_intercity": _is_intercity(city1, dest_city),
         }
     return run(work())
+
+
+def _coords_or_none(value) -> dict | None:
+    """Приводит координаты к {'lat': float, 'lon': float} или None."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        lat = float(value.get("lat", value.get("latitude")))
+        lon = float(value.get("lon", value.get("longitude")))
+    except (TypeError, ValueError):
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    if lat == 0 and lon == 0:
+        return None
+    return {"lat": lat, "lon": lon}
+
+
+async def _city_by_coords(lat: float, lon: float) -> str:
+    """Город по координатам (обратный геокодинг)."""
+    try:
+        _addr, city = await geocoder.get_address_by_coordinates(lat, lon)
+        return city or ""
+    except Exception:
+        return ""
+
+
+def _city_mentioned(text: str, city: str) -> bool:
+    """Указан ли город в тексте адреса."""
+    if not text or not city:
+        return False
+    return city.strip().lower() in text.lower()
+
+
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Расстояние между точками в километрах."""
+    import math
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return r * 2 * math.asin(math.sqrt(a))
 
 
 def create_order(uid: int, draft: dict, price=None) -> dict:
@@ -493,7 +567,12 @@ def act(uid: int, body: dict) -> dict:
             S.update_user(uid, **fields)
         return {"ok": True}
     if op == "quote":
-        return {"ok": True, "draft": quote(body.get("pickup", ""), body.get("destination", ""), body.get("stop", ""))}
+        return {"ok": True, "draft": quote(
+            body.get("pickup", ""), body.get("destination", ""),
+            body.get("stop", ""),
+            pickup_coords=body.get("pickup_coords"),
+            dest_coords=body.get("dest_coords") or body.get("destination_coords"),
+        )}
     if op == "order.create":
         draft = body.get("draft") or {}
         if not draft.get("pickup_coords"):

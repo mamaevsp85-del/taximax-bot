@@ -611,8 +611,10 @@
       for (var y = y0; y <= y1; y++) {
         if (y < 0 || y >= max) continue;
         var xx = ((x % max) + max) % max;
-        html += '<img alt="" src="https://tile.openstreetmap.org/' + MAP_Z + "/" + xx + "/" + y + '.png" style="left:' +
-          (x * 256 - left) + "px;top:" + (y * 256 - top) + 'px">';
+        // Яндекс-тайлы: работают в РФ без блокировок
+        html += '<img alt="" loading="lazy" src="https://core-renderer-tiles.maps.yandex.net/tiles?l=map&v=21.09.17&x=' +
+          xx + "&y=" + y + "&z=" + MAP_Z + "&scale=1&lang=ru_RU\" style=\"left:" +
+          (x * 256 - left) + "px;top:" + (y * 256 - top) + 'px" onerror="this.style.display=\'none\'">';
       }
     }
     tiles.innerHTML = html;
@@ -640,28 +642,54 @@
       lat: Number(S && S.user && S.user.lat) || 53.827,
       lon: Number(S && S.user && S.user.lon) || 91.306
     };
-    sheet('<h2>Точка на карте</h2><p class="muted">Сдвиньте карту: булавка стоит в центре.</p>' +
+    sheet('<h2>Точка на карте</h2>' +
+      '<p class="muted">Сдвиньте карту — булавка в центре показывает выбранную точку. ' +
+      'Или введите адрес текстом.</p>' +
       '<div class="pick-map" id="pick-map"><div class="pick-tiles" id="pick-tiles"></div><div class="pick-pin"></div></div>' +
-      field("geoaddr", "Или адрес", "", "Черногорск, Юбилейная 29") +
-      '<button class="btn ghost" data-act="map-find">Найти адрес</button><button class="btn" data-act="map-ok">Это место</button>');
+      field("geoaddr", "Адрес", "", "Черногорск, Юбилейная 29") +
+      '<button class="btn ghost" data-act="map-find">Найти по адресу</button>' +
+      '<button class="btn" data-act="map-ok">Это место</button>');
     paintMap();
     bindMap();
   }
   function devicePoint() {
     return new Promise(function (resolve, reject) {
-      if (!navigator.geolocation) { reject(); return; }
-      navigator.geolocation.getCurrentPosition(function (pos) {
-        resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude });
-      }, function () { reject(); }, { enableHighAccuracy: false, timeout: 8000, maximumAge: 120000 });
+      if (!navigator.geolocation) { reject(new Error("no-geo-api")); return; }
+      var done = false;
+      var timer = setTimeout(function () {
+        if (!done) { done = true; reject(new Error("timeout")); }
+      }, 12000);
+      try {
+        navigator.geolocation.getCurrentPosition(function (pos) {
+          if (done) return;
+          done = true; clearTimeout(timer);
+          resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+        }, function (err) {
+          if (done) return;
+          done = true; clearTimeout(timer);
+          reject(err || new Error("denied"));
+        }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+      } catch (e) {
+        if (!done) { done = true; clearTimeout(timer); reject(e); }
+      }
     });
   }
+
   function needPoint(done) {
     toast("Запрашиваю гео…");
     devicePoint().then(function (p) {
       api("/api/act", { op: "geo.resolve", lat: p.lat, lon: p.lon }).then(function (res) {
         done({ lat: res.lat, lon: res.lon, address: res.address });
-      }).catch(function () { done(p); });
-    }).catch(function () { openMap(done); });
+      }).catch(function () {
+        done({ lat: p.lat, lon: p.lon, address: "" });
+      });
+    }).catch(function (err) {
+      // В webview MAX геолокация часто недоступна — открываем карту
+      var msg = (err && err.code === 1) ? "Гео запрещено. Выберите точку на карте"
+              : "Гео недоступно. Выберите точку на карте";
+      toast(msg);
+      openMap(done);
+    });
   }
 
   function render() {
@@ -711,7 +739,9 @@
     "pickup-next": function () {
       var pickup = val("pickup");
       if (pickup.length < 3) { toast("Укажите адрес"); return; }
-      draft.pickup = pickup; draft.step = 2; render();
+      draft.pickup = pickup;
+      draft.step = 2;
+      render();
     },
     "dest-next": function () {
       var dest = val("dest");
@@ -721,7 +751,13 @@
       draft.step = 3;
       draft.pending = true;
       render();
-      api("/api/act", { op: "quote", pickup: draft.pickup, destination: dest, stop: draft.stop || "" }).then(function (data) {
+      api("/api/act", {
+        op: "quote",
+        pickup: draft.pickup,
+        destination: dest,
+        stop: draft.stop || "",
+        pickup_coords: draft.pickup_coords || null
+      }).then(function (data) {
         draft = data.draft; draft.step = 3; draft.pending = false; render();
       }).catch(function (e) { draft.step = 2; draft.pending = false; toast(e.message); render(); });
     },
@@ -794,6 +830,9 @@
       needPoint(function (p) {
         var input = document.getElementById("pickup");
         if (input) input.value = p.address || (p.lat.toFixed(5) + ", " + p.lon.toFixed(5));
+        // Запоминаем координаты, чтобы не геокодировать повторно
+        draft.pickup_coords = { lat: p.lat, lon: p.lon };
+        if (p.address) draft.pickup = p.address;
       });
     },
     "map-find": function () {

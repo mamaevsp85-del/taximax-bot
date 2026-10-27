@@ -58,10 +58,10 @@ class Storage:
             "driver_welcome": "🚗 Меню водителя.\n\nВыберите действие:",
             "support_contact": settings.support_contact,
             "tariff_intercity": {
-                "base_price": 100, "included_km": 2, "price_per_km": 20,
-                "price_per_minute": 2, "min_price": 50,
+                "base_price": 150, "included_km": 5, "price_per_km": 35,
+                "price_per_minute": 0, "min_price": 300,
                 "rounding_type": "up", "rounding_step": 10,
-                "free_waiting_minutes": 3, "waiting_price_per_minute": 5,
+                "free_waiting_minutes": 5, "waiting_price_per_minute": 5,
             },
             "tariffs_by_city": {},
             "tariff_edit_scope": "intercity",

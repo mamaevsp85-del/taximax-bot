@@ -19,11 +19,22 @@ logger = logging.getLogger(__name__)
 
 
 def _default_tariff() -> Dict[str, Any]:
+    """Городской тариф по умолчанию."""
     return {
         "base_price": 100, "included_km": 2, "price_per_km": 20,
         "price_per_minute": 2, "min_price": 50,
         "rounding_type": "up", "rounding_step": 10,
         "free_waiting_minutes": 3, "waiting_price_per_minute": 5,
+    }
+
+
+def _default_intercity_tariff() -> Dict[str, Any]:
+    """Междугородний тариф по умолчанию — дороже городского."""
+    return {
+        "base_price": 150, "included_km": 5, "price_per_km": 35,
+        "price_per_minute": 0, "min_price": 300,
+        "rounding_type": "up", "rounding_step": 10,
+        "free_waiting_minutes": 5, "waiting_price_per_minute": 5,
     }
 
 
@@ -38,10 +49,16 @@ def get_tariff_settings(city: Optional[str] = None, intercity: bool = False) -> 
     admin = storage.storage.admin_data
     city_key = normalize_city(city or "")
     if intercity:
-        return admin.get("tariff_intercity") or _default_tariff()
+        saved = admin.get("tariff_intercity") or {}
+        base = _default_intercity_tariff()
+        base.update({k: v for k, v in saved.items() if v is not None})
+        return base
     if city_key:
         tb = admin.get("tariffs_by_city") or {}
-        return tb.get(city_key) or _default_tariff()
+        city_tariff = tb.get(city_key) or {}
+        base = _default_tariff()
+        base.update({k: v for k, v in city_tariff.items() if v is not None})
+        return base
     return _default_tariff()
 
 
@@ -58,9 +75,48 @@ def apply_rounding(price: float, tariff: Dict[str, Any]) -> float:
 
 
 def _is_intercity(pickup_city: Optional[str], destination_city: Optional[str]) -> bool:
-    if pickup_city and destination_city:
-        return normalize_city(pickup_city) != normalize_city(destination_city)
-    return False
+    """Межгород — только если ОБА города известны и различаются.
+
+    Если город назначения не определён, поездка считается внутригородской:
+    пассажир заказывает такси из своего города, и адрес без города
+    относится к тому же городу.
+    """
+    if not pickup_city or not destination_city:
+        return False
+    return normalize_city(pickup_city) != normalize_city(destination_city)
+
+
+def resolve_destination_city(pickup_city: Optional[str],
+                             destination_city: Optional[str],
+                             destination_text: Optional[str] = "") -> str:
+    """Определяет город назначения без ложного межгорода.
+
+    Проблема: пассажир пишет «Юбилейная 29» без города, а геокодер может
+    найти такую улицу в другом городе — и поездка ошибочно становится
+    межгородней с междугородним тарифом.
+
+    Правило:
+      • пассажир явно указал другой город в тексте адреса — межгород;
+      • город не указан или совпадает с городом подачи — внутригородская.
+    """
+    if not pickup_city:
+        return destination_city or ""
+    if not destination_city:
+        # Город не определён — считаем, что это город подачи.
+        return pickup_city
+
+    same = normalize_city(pickup_city) == normalize_city(destination_city)
+    if same:
+        return destination_city
+
+    # Геокодер вернул другой город. Принимаем его, только если пассажир
+    # действительно написал этот город в адресе.
+    text = (destination_text or "").lower()
+    if text and normalize_city(destination_city).lower() in text:
+        return destination_city
+
+    return pickup_city
+
 
 
 def is_intercity(pickup_city: Optional[str], destination_city: Optional[str]) -> bool:
