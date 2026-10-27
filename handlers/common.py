@@ -17,21 +17,22 @@ from ui.reply import Reply
 logger = logging.getLogger(__name__)
 
 # Адрес Mini App (для локального теста - localhost, для продакшена - внешний URL)
-MINI_APP_URL = "http://127.0.0.1:8000"
+import os as _os
+MINI_APP_URL = _os.environ.get("MINI_APP_URL", "https://taximax-bot.onrender.com")
 
 
 def register_common(router: Router) -> None:
     # --- Команда /minimax - открывает Mini App ---
     async def open_minimax(client, user_id, update, ctx):
-        # Для локального теста показываем инструкцию
+        # Персональная ссылка с user_id для идентификации в Mini-App
+        personal_url = f"{MINI_APP_URL}/?uid={user_id}"
+        from max_api.keyboards import link_button, inline_keyboard, keyboard_attachment
+        kb = keyboard_attachment([[link_button("🚀 Открыть Mini-App", personal_url)]])
         text = (
             "🎉 Добро пожаловать в Mini-app ТаксиМакс!\n\n"
-            "Mini App работает через веб-интерфейс в Telegram.\n"
-            "Для локального теста откройте ссылку в браузере:\n"
-            f"http://127.0.0.1:8000\n\n"
-            "Или используйте ngrok для тестирования внутри Telegram."
+            "Нажмите кнопку ниже, чтобы открыть приложение."
         )
-        await Reply(client, user_id).send(text, parse_mode="HTML")
+        await Reply(client, user_id).send(text, parse_mode="HTML", attachments=kb)
 
     router.on_command("minimax")(open_minimax)
 
