@@ -10,7 +10,7 @@ import traceback
 from datetime import datetime
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 BOT = ROOT
@@ -55,17 +55,39 @@ def run(coro):
         return pool.submit(asyncio.run, coro).result()
 
 
-def uid_from(handler) -> int:
+def uid_from(handler, body: dict | None = None) -> int:
+    """ID пользователя: cookie `mx` -> ?uid= в URL -> поле uid в теле запроса."""
     raw = handler.headers.get("Cookie") or ""
     jar = SimpleCookie()
     jar.load(raw)
     morsel = jar.get("mx")
-    if not morsel:
-        return 0
-    try:
-        return int(morsel.value)
-    except ValueError:
-        return 0
+    if morsel:
+        try:
+            uid = int(morsel.value)
+            if uid > 0:
+                return uid
+        except ValueError:
+            pass
+
+    query = parse_qs(urlparse(handler.path).query)
+    for key in ("uid", "user_id"):
+        for value in query.get(key, []):
+            try:
+                uid = int(value)
+                if uid > 0:
+                    return uid
+            except ValueError:
+                continue
+
+    if body:
+        for key in ("uid", "user_id"):
+            try:
+                uid = int(body.get(key) or 0)
+                if uid > 0:
+                    return uid
+            except (TypeError, ValueError):
+                continue
+    return 0
 
 
 def brief_order(o: dict) -> dict:
@@ -119,7 +141,8 @@ def user_card(uid: int) -> dict:
         "driver_name": S.get_driver_name(uid),
         "driver_phone": S.get_driver_phone(uid),
         "balance": S.get_balance(uid),
-        "balance_hidden": S.balances_disabled(),
+        "balance_hidden": S.balances_disabled() and not (
+            S.is_admin(uid) or S.is_manager(uid)),
         "access": S.has_active_access(uid),
         "blocked": S.is_driver_blocked(uid),
         "geo": (u.get("last_location") or {}).get("address") or "",
@@ -169,7 +192,6 @@ def passenger_block(uid: int) -> dict:
 
 
 def driver_block(uid: int) -> dict:
-    available = [brief_order(S.get_order(o["id"]) if isinstance(o, dict) else o) for o in []]
     raw = get_available_orders_for_driver(uid) or []
     available = []
     for item in raw:
@@ -455,8 +477,11 @@ def act(uid: int, body: dict) -> dict:
         raise PermissionError("Сначала выберите профиль")
     if op == "role":
         role = body.get("role")
+        roles = S.compute_roles(uid)
+        if role not in roles:
+            raise ValueError(f"Роль «{role}» недоступна. Доступны: {', '.join(roles)}")
         if not S.set_active_role(uid, role):
-            raise ValueError("Роль недоступна")
+            raise ValueError("Не удалось переключить роль")
         return {"ok": True}
     if op == "profile":
         fields = {}
@@ -709,7 +734,8 @@ def admin_act(body: dict) -> dict:
         S.save()
     elif op == "reset_roles":
         S.remove_admin(uid)
-        S.update_user(uid, type="user", active_role="passenger", passenger_removed=True, driver_verification_status=None)
+        S.update_user(uid, type="user", active_role="passenger",
+                      driver_verification_status=None)
         return {"ok": True}
     elif op == "admin.manager.add":
         S.add_manager(int(body["id"]))
@@ -788,6 +814,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not uid:
                     self.send_json(401, {"ok": False, "error": "Нет сессии"})
                     return
+                if uid not in S.users:
+                    S.ensure_user(uid)
                 self.send_json(200, state_for(uid))
                 return
             self.serve_file(path)
@@ -802,7 +830,7 @@ class Handler(BaseHTTPRequestHandler):
             if path != "/api/act":
                 self.send_json(404, {"ok": False, "error": "Не найдено"})
                 return
-            uid = uid_from(self)
+            uid = uid_from(self, body)
             if body.get("op") == "login" and not body.get("max_id") and self.via_public_url():
                 self.send_json(403, {"ok": False, "error": "Вход по списку доступен только на этом компьютере"})
                 return

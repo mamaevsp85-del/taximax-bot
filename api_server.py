@@ -207,17 +207,12 @@ async def admin_make_super(request):
         # Add as admin
         if hasattr(storage.storage, 'add_admin'):
             storage.storage.add_admin(uid)
-        # Update user
+        # Пассажир — базовая роль, она остаётся у пользователя всегда.
         user = storage.storage.get_user(uid)
         if user:
-            fields = {'active_role': 'admin', 'type': 'admin'}
-            if remove_passenger:
-                fields['passenger_removed'] = True
-            else:
-                # Ensure passenger role is not removed
-                if 'passenger_removed' in (user or {}):
-                    fields['passenger_removed'] = False
-            storage.storage.update_user(uid, **fields)
+            storage.storage.update_user(uid, active_role='admin')
+            if user.get('passenger_removed'):
+                storage.storage.update_user(uid, passenger_removed=None)
         updated_user = storage.storage.get_user(uid)
         roles = storage.storage.compute_roles(uid)
         return web.json_response({'success': True, 'user': updated_user, 'roles': roles})

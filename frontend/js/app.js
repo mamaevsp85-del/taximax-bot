@@ -66,14 +66,40 @@
       inflight--;
     }
   }
+  function normalizeState(data) {
+    if (!data || typeof data !== "object") return data;
+    if (!data.user) data.user = {};
+    data.user.roles = Array.isArray(data.user.roles) ? data.user.roles : [];
+    if (!data.user.role) data.user.role = data.user.roles[0] || "passenger";
+    data.passenger = data.passenger || {};
+    data.driver = data.driver || {};
+    data.admin = data.admin || {};
+    if (!Array.isArray(data.passenger.orders)) data.passenger.orders = [];
+    if (!Array.isArray(data.passenger.favorites)) data.passenger.favorites = [];
+    if (!Array.isArray(data.driver.available)) data.driver.available = [];
+    if (!Array.isArray(data.driver.history)) data.driver.history = [];
+    if (!Array.isArray(data.driver.transactions)) data.driver.transactions = [];
+    if (!data.driver.stats) data.driver.stats = {};
+    if (!data.driver.tariffs) data.driver.tariffs = {};
+    if (!data.admin.drivers) data.admin.drivers = [];
+    if (!data.admin.passengers) data.admin.passengers = [];
+    if (!data.admin.orders) data.admin.orders = [];
+    if (!data.admin.pending) data.admin.pending = [];
+    if (!data.admin.managers) data.admin.managers = [];
+    if (!data.admin.admins) data.admin.admins = [];
+    if (!data.admin.cities) data.admin.cities = [];
+    if (!data.admin.commission) data.admin.commission = {};
+    if (!data.user.docs) data.user.docs = {};
+    return data;
+  }
+
   async function refresh() {
-    S = await api("/api/state");
+    S = normalizeState(await api("/api/state"));
     render();
   }
   function predict(body) {
     if (!S || !S.user) return;
     var op = body.op;
-    if (op === "role" && S.user.roles.indexOf(body.role) >= 0) S.user.role = body.role;
     if (op === "driver.line") S.user.line = body.status;
     if (op === "order.cancel" && S.passenger && S.passenger.active && S.passenger.active.id === body.id) {
       S.passenger.active.status = "cancelled";
@@ -101,7 +127,7 @@
         body.uid = maxUser.id;
       }
       var data = await api("/api/act", body);
-      if (data.state) S = data.state;
+      if (data.state) S = normalizeState(data.state);
       render();
       return true;
     } catch (e) {
@@ -615,14 +641,16 @@
     role: function (el) {
       var next = el.dataset.role;
       if (!S.user.roles || S.user.roles.indexOf(next) < 0) { toast("Роль недоступна"); return; }
-      S.user.role = next;
       stack = [];
-      screen = homeOf();
-      run({ op: "role", role: next });
+      run({ op: "role", role: next }).then(function (ok) {
+        if (!ok) return;
+        screen = homeOf();
+        render();
+      });
     },
     login: function (el) {
       api("/api/act", { op: "login", user_id: Number(el.dataset.id) }).then(function (data) {
-        if (data.state) { S = data.state; screen = homeOf(); render(); }
+        if (data.state) { S = normalizeState(data.state); screen = homeOf(); render(); }
       }).catch(function (e) { toast(e.message); });
     },
     start: function () { draft = { step: 1 }; go("trip"); },
@@ -794,7 +822,7 @@
     stateUrl += "?uid=" + maxUser.id;
   }
   api(stateUrl).then(function (data) {
-    S = data;
+    S = normalizeState(data);
     if (start === "driver" || start === "admin" || start === "passenger") {
       if (S.user.roles.indexOf(start) >= 0 && S.user.role !== start) {
         run({ op: "role", role: start });
@@ -806,7 +834,7 @@
   }).catch(function (err) {
     if (maxUser && maxUser.id) {
       api("/api/act", { op: "login", max_id: maxUser.id, name: maxUser.name }).then(function (data) {
-        if (data.state) { S = data.state; if (maxUser) window.Maximus.storeUser(maxUser); screen = homeOf(); render(); }
+        if (data.state) { S = normalizeState(data.state); if (maxUser) window.Maximus.storeUser(maxUser); screen = homeOf(); render(); }
       }).catch(function (e2) {
         showPeople();
       });
@@ -822,7 +850,7 @@
     if (maxUser && maxUser.id) stateUrl += "?uid=" + maxUser.id;
     api(stateUrl).then(function (data) {
       if (inflight) return;
-      S = data;
+      S = normalizeState(data);
       render();
     }).catch(function () {});
   }, 3000);

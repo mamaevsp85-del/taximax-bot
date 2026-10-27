@@ -200,10 +200,13 @@ class Storage:
 
     # ==================== РОЛИ ====================
     def compute_roles(self, user_id: int) -> list:
+        """Роли пользователя.
+
+        Пассажир — базовая роль: она есть у всех и не может быть снята.
+        Водитель появляется после одобрения анкеты, админ — из настроек.
+        """
         u = self.users.get(int(user_id), {})
-        roles = []
-        if not u.get("passenger_removed"):
-            roles.append(ROLE_PASSENGER)
+        roles = [ROLE_PASSENGER]
         if u.get("driver_verification_status") == "approved":
             roles.append(ROLE_DRIVER)
         if self.is_admin(user_id):
@@ -1214,6 +1217,8 @@ class Storage:
         """Все водители (есть авто/роль/статус) с полями для админки."""
         result = []
         for uid, u in self.users.items():
+            if int(uid) <= 0:
+                continue  # служебные/битые записи в админку не попадают
             is_driver = (u.get("type") == ROLE_DRIVER or u.get("car_model")
                          or u.get("driver_verification_status"))
             if not is_driver:
@@ -1303,6 +1308,8 @@ class Storage:
     def get_all_passengers(self) -> list:
         result = []
         for uid, u in self.users.items():
+            if int(uid) <= 0:
+                continue  # служебные/битые записи в админку не попадают
             if u.get("driver_verification_status") == "approved":
                 continue  # показываем в списке водителей
             orders = self.get_orders_by_passenger(uid)
