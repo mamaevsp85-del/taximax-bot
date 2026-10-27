@@ -424,6 +424,22 @@ def act(uid: int, body: dict) -> dict:
             S.ensure_user(user_id, name=name)
         if user_id not in S.users:
             raise ValueError("Пользователь не найден")
+    if op == "geo.resolve":
+        # Геокодинг не требует авторизации
+        if body.get("address"):
+            text = str(body.get("address") or "").strip()
+            coords, city = run(geocoder.geocode_address(text))
+            if not coords:
+                raise ValueError("Геокодирование не удалось")
+            return {"ok": True, "lat": coords["lat"], "lon": coords["lon"], "address": text, "city": city or ""}
+        lat, lon = float(body.get("lat")), float(body.get("lon"))
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise ValueError("Неверные координаты")
+        address, city = run(geocoder.get_address_by_coordinates(lat, lon))
+        if not address:
+            address = f"{lat:.5f}, {lon:.5f}"
+        return {"ok": True, "lat": lat, "lon": lon, "address": address, "city": city or ""}
+    if not uid:
         return {"ok": True, "user_id": user_id}
     if not uid:
         raise PermissionError("Сначала выберите профиль")
