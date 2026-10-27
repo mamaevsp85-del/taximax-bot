@@ -41,6 +41,35 @@ def _extract_city(components) -> str:
     return names["locality"] or names["area"] or names["province"]
 
 
+def short_address(components) -> str:
+    """Короткий адрес: «Город, улица, дом» без страны и региона.
+
+    Приоритет города: locality (город/село) → district → area.
+    Для населённых пунктов без улиц возвращает «Посёлок, дом».
+    """
+    locality = district = area = street = house = ""
+    for comp in components or []:
+        kind = comp.get("kind")
+        name = (comp.get("name") or "").strip()
+        if not name:
+            continue
+        if kind == "locality" and not locality:
+            locality = name
+        elif kind == "district" and not district:
+            district = name
+        elif kind == "area" and not area:
+            area = name
+        elif kind == "street" and not street:
+            street = name
+        elif kind in ("house", "building") and not house:
+            house = name
+
+    city = locality or district or area
+    if house:
+        return ", ".join(p for p in (city, street, house) if p)
+    return ", ".join(p for p in (city, street) if p)
+
+
 async def geocode_address(address: str) -> Tuple[Optional[dict], str]:
     """
     Геокодирует адрес. Возвращает (coords, city):
@@ -121,8 +150,9 @@ async def get_address_by_coordinates(latitude: float, longitude: float) -> Tuple
             return "", ""
         geo = members[0]["GeoObject"]
         meta = geo.get("metaDataProperty", {}).get("GeocoderMetaData", {})
-        addr_text = meta.get("text", "")
-        city = _extract_city(meta.get("Address", {}).get("Components", []))
+        components = meta.get("Address", {}).get("Components", [])
+        addr_text = short_address(components) or meta.get("text", "")
+        city = _extract_city(components)
         return addr_text, city
     except (KeyError, IndexError) as exc:
         logger.error("Не удалось разобрать ответ обратного геокодера: %s", exc)

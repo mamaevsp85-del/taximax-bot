@@ -973,6 +973,17 @@ select:focus {
    КАРТА
    ========================================================= */
 
+/* Поле подъезда — рядом с адресом, компактное */
+.geo-extra {
+  margin-top: -4px;
+}
+
+.geo-extra label.field { margin: 10px 0 4px; }
+
+.geo-extra input {
+  max-width: 180px;
+}
+
 .pick-map {
   position: relative;
   height: 280px;

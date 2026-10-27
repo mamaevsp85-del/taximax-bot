@@ -672,6 +672,11 @@
         '<div class="pick-pin"></div>' +
       '</div>' +
       field("geoaddr", "Адрес", "", "Черногорск, Юбилейная 29") +
+      '<div class="geo-extra">' +
+        '<label class="field"><span>Подъезд</span>' +
+          '<input id="entrance" type="text" inputmode="numeric" placeholder="необязательно" value="">' +
+        '</label>' +
+      '</div>' +
       '<div class="btn-row">' +
         '<button class="btn ghost" data-act="map-find">Найти адрес</button>' +
         '<button class="btn ghost" data-act="map-gps">Моё место</button>' +
@@ -912,11 +917,21 @@
       if (!mapDraft || !mapDone) return;
       var done = mapDone;
       var typed = val("geoaddr");
+      var entrance = val("entrance");
+
+      var withEntrance = function (address) {
+        var clean = (address || "").trim();
+        if (!clean || !entrance) return clean;
+        if (/подъезд/i.test(clean)) return clean;
+        return clean + ", подъезд " + entrance;
+      };
+
       var finish = function (lat, lon, address) {
         closeSheet();
         mapDone = null;
-        done({ lat: lat, lon: lon, address: address || "" });
+        done({ lat: lat, lon: lon, address: withEntrance(address) });
       };
+
       // Если пользователь ввёл адрес — уважаем его
       if (typed && typed !== mapDraft.address) {
         api("/api/act", { op: "geo.resolve", address: typed }).then(function (res) {
@@ -924,7 +939,7 @@
         }).catch(function () {
           api("/api/act", { op: "geo.resolve", lat: mapDraft.lat, lon: mapDraft.lon })
             .then(function (res) { finish(res.lat, res.lon, res.address); })
-            .catch(function () { finish(mapDraft.lat, mapDraft.lon, ""); });
+            .catch(function () { finish(mapDraft.lat, mapDraft.lon, typed || ""); });
         });
         return;
       }
