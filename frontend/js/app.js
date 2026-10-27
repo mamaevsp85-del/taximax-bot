@@ -49,6 +49,10 @@
   async function api(path, body) {
     inflight++;
     try {
+      // Auto-add uid for /api/act calls
+      if (body && path === "/api/act" && maxUser && maxUser.id && !body.uid && !body.user_id && !body.max_id) {
+        body.uid = maxUser.id;
+      }
       var res = await fetch(path, {
         method: body ? "POST" : "GET",
         headers: body ? { "Content-Type": "application/json" } : {},
@@ -92,6 +96,10 @@
     predict(body);
     render();
     try {
+      // Pass user id for authentication
+      if (maxUser && maxUser.id && !body.uid && !body.user_id) {
+        body.uid = maxUser.id;
+      }
       var data = await api("/api/act", body);
       if (data.state) S = data.state;
       render();
@@ -810,7 +818,9 @@
   setInterval(function () {
     if (!S || inflight) return;
     if (["live", "d-current", "d-orders"].indexOf(screen) < 0) return;
-    api("/api/state").then(function (data) {
+    var stateUrl = "/api/state";
+    if (maxUser && maxUser.id) stateUrl += "?uid=" + maxUser.id;
+    api(stateUrl).then(function (data) {
       if (inflight) return;
       S = data;
       render();
