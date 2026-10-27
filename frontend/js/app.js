@@ -775,7 +775,11 @@
   window.Maximus.ready();
   var maxUser = window.Maximus.user();
   var start = window.Maximus.startParam();
-  api("/api/state").then(function (data) {
+  var stateUrl = "/api/state";
+  if (maxUser && maxUser.id) {
+    stateUrl += "?uid=" + maxUser.id;
+  }
+  api(stateUrl).then(function (data) {
     S = data;
     if (start === "driver" || start === "admin" || start === "passenger") {
       if (S.user.roles.indexOf(start) >= 0 && S.user.role !== start) {
