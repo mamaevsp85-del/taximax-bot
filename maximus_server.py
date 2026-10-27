@@ -125,12 +125,32 @@ def brief_order(o: dict) -> dict:
     }
 
 
+def _normalize_phone(phone: str) -> str:
+    """Приводит номер к виду 7XXXXXXXXXX."""
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    if len(digits) == 11 and digits[0] in ("7", "8"):
+        return "7" + digits[1:]
+    if len(digits) == 10:
+        return "7" + digits
+    return digits or str(phone or "").strip()
+
+
+def _profile_complete(user: dict) -> bool:
+    """Профиль заполнен: имя, телефон и родной город."""
+    name = (user.get("name") or "").strip()
+    phone = "".join(ch for ch in str(user.get("phone") or "") if ch.isdigit())
+    city = (user.get("home_city") or "").strip()
+    return bool(name and len(phone) >= 10 and city)
+
+
 def user_card(uid: int) -> dict:
     u = S.get_user(uid) or {}
     return {
         "id": uid,
         "name": u.get("name") or "",
         "phone": u.get("phone") or "",
+        "home_city": u.get("home_city") or "",
+        "profile_complete": _profile_complete(u),
         "rating": u.get("rating", 5),
         "roles": S.compute_roles(uid),
         "role": S.get_active_role(uid),
@@ -587,12 +607,15 @@ def act(uid: int, body: dict) -> dict:
     if op == "profile":
         fields = {}
         if body.get("name"):
-            fields["name"] = body["name"].strip()
+            fields["name"] = str(body["name"]).strip()[:60]
         if body.get("phone"):
-            fields["phone"] = body["phone"].strip()
+            fields["phone"] = _normalize_phone(str(body["phone"]))
+        if body.get("home_city"):
+            fields["home_city"] = str(body["home_city"]).strip()[:60]
         if fields:
             S.update_user(uid, **fields)
-        return {"ok": True}
+        u = S.get_user(uid) or {}
+        return {"ok": True, "profile_complete": _profile_complete(u)}
     if op == "quote":
         return {"ok": True, "draft": quote(
             body.get("pickup", ""), body.get("destination", ""),
@@ -601,6 +624,10 @@ def act(uid: int, body: dict) -> dict:
             dest_coords=body.get("dest_coords") or body.get("destination_coords"),
         )}
     if op == "order.create":
+        # Без заполненного профиля заказ создать нельзя
+        u = S.get_user(uid) or {}
+        if not _profile_complete(u):
+            raise ValueError("Заполните профиль: имя, телефон и город")
         draft = body.get("draft") or {}
         if not draft.get("pickup_coords"):
             draft = quote(draft.get("pickup", ""), draft.get("destination", ""), draft.get("stop", ""))

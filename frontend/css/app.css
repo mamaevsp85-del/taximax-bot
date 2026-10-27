@@ -403,6 +403,45 @@ h2:first-child { margin-top: 4px; }
 
 
 /* =========================================================
+   ЗНАКОМСТВО (первый вход)
+   ========================================================= */
+
+.onb-hero {
+  text-align: center;
+  padding: 8px 0 20px;
+}
+
+.onb-logo {
+  width: 76px;
+  height: 76px;
+  margin: 0 auto 16px;
+  border-radius: 22px;
+  overflow: hidden;
+  background: var(--accent);
+  box-shadow: var(--shadow-md);
+  animation: onb-pop 0.6s var(--ease) backwards;
+}
+
+.onb-logo img { width: 100%; height: 100%; object-fit: cover; }
+
+@keyframes onb-pop {
+  0% { transform: scale(0.6) rotate(-10deg); opacity: 0; }
+  70% { transform: scale(1.05) rotate(2deg); }
+  100% { transform: scale(1) rotate(0); opacity: 1; }
+}
+
+.onb-hero h1 {
+  margin: 0 0 8px;
+  font-family: Unbounded, Manrope, sans-serif;
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.25;
+}
+
+.onb-hero .muted { margin: 0; }
+
+/* =========================================================
    КНОПКИ
    ========================================================= */
 
@@ -983,6 +1022,42 @@ select:focus {
 .geo-extra input {
   max-width: 180px;
 }
+
+/* Кнопка «Отправить гео» поверх карты */
+.map-send {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 13px 16px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-2) 100%);
+  color: var(--accent-ink);
+  font-weight: 800;
+  font-size: 15px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  transition: transform 0.12s var(--ease);
+}
+
+.map-send:active { transform: scale(0.975); }
+
+.map-send b { font-size: 15px; line-height: 1.2; }
+
+.map-send small {
+  font-size: 10.5px;
+  font-weight: 700;
+  opacity: 0.72;
+  line-height: 1.2;
+}
+
+/* Отступ снизу, чтобы кнопка не перекрывала булавку */
+.pick-map { padding-bottom: 0; }
 
 .pick-map {
   position: relative;

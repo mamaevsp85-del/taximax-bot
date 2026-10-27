@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
   var S = null;
   var screen = "home";
   var stack = [];
@@ -199,6 +199,19 @@
     return "home";
   }
 
+  // Первый вход: профиль не заполнен — показываем знакомство
+  function needOnboarding() {
+    return !!(S && S.user && S.user.profile_complete === false);
+  }
+
+  function entryScreen() {
+    if (needOnboarding()) {
+      if (!window._onbStep) window._onbStep = 1;
+      return "welcome";
+    }
+    return homeOf();
+  }
+
   function header() {
     if (!S) return '<div class="brand"><img src="assets/logo.jpg" alt=""><div class="word">Maximus<small>TAXI</small></div></div>';
     var title = S.user.role === "driver" ? "Водитель" : S.user.role === "admin" ? "Админ" : "Пассажир";
@@ -320,6 +333,40 @@
       return "<h2>Избранное</h2>" + (favs.length ? favs.map(function (f, i) {
         return row(f.label || "Маршрут", "", "use-fav", { index: i });
       }).join("") : '<p class="list-empty">Сохраните маршрут из завершённой поездки</p>');
+    },
+    welcome: function () {
+      var u = S.user || {};
+      var step = (window._onbStep || 1);
+      var bars = [1, 2, 3].map(function (n) {
+        return '<i class="' + (n <= step ? "on" : "") + '"></i>';
+      }).join("");
+
+      var head = '<div class="onb-hero">' +
+        '<div class="onb-logo"><img src="assets/logo.jpg" alt=""></div>' +
+        '<h1>Добро пожаловать в Maximus Taxi</h1>' +
+        '<p class="muted">Давайте познакомимся — это займёт меньше минуты.</p>' +
+        '</div><div class="steps">' + bars + '</div>';
+
+      if (step === 1) {
+        return head +
+          '<h2>Как вас зовут?</h2>' +
+          field("onb_name", "Имя", u.name || "", "Сергей") +
+          '<button class="btn" data-act="onb-next">Далее</button>';
+      }
+      if (step === 2) {
+        return head +
+          '<h2>Ваш телефон</h2>' +
+          '<p class="muted">Нужен, чтобы водитель мог связаться с вами.</p>' +
+          field("onb_phone", "Телефон", u.phone || "", "+7 913 443-04-04") +
+          '<button class="btn" data-act="onb-next">Далее</button>' +
+          '<button class="btn ghost" data-act="onb-back">Назад</button>';
+      }
+      return head +
+        '<h2>Ваш город</h2>' +
+        '<p class="muted">Откуда вы обычно заказываете такси.</p>' +
+        field("onb_city", "Город", u.home_city || "", "Черногорск") +
+        '<button class="btn" data-act="onb-finish">Готово, поехали</button>' +
+        '<button class="btn ghost" data-act="onb-back">Назад</button>';
     },
     profile: function () {
       return "<h2>Профиль</h2><div class=\"card\"><b>" + esc(S.user.name || "Без имени") + '</b><p class="muted">Телефон ' +
@@ -670,6 +717,10 @@
       '<div class="pick-map" id="pick-map">' +
         '<div class="pick-tiles" id="pick-tiles"></div>' +
         '<div class="pick-pin"></div>' +
+        '<button class="map-send" data-act="map-ok">' +
+          '<b>Отправить гео</b>' +
+          '<small id="map-send-sub">нажмите, чтобы подтвердить точку</small>' +
+        '</button>' +
       '</div>' +
       field("geoaddr", "Адрес", "", "Черногорск, Юбилейная 29") +
       '<div class="geo-extra">' +
@@ -680,8 +731,7 @@
       '<div class="btn-row">' +
         '<button class="btn ghost" data-act="map-find">Найти адрес</button>' +
         '<button class="btn ghost" data-act="map-gps">Моё место</button>' +
-      '</div>' +
-      '<button class="btn" data-act="map-ok">Отправить гео</button>');
+      '</div>');
 
     paintMap();
     bindMap();
@@ -757,6 +807,13 @@
       stack = [];
       var next = el.dataset.screen;
       if (next === "trip") {
+        if (needOnboarding()) {
+          window._onbStep = 1;
+          screen = "welcome";
+          render();
+          toast("Сначала заполните профиль");
+          return;
+        }
         if (S.passenger && S.passenger.active) { picked = S.passenger.active.id; next = "live"; }
         else draft = { step: 1 };
       }
@@ -777,10 +834,19 @@
     },
     login: function (el) {
       api("/api/act", { op: "login", user_id: Number(el.dataset.id) }).then(function (data) {
-        if (data.state) { S = normalizeState(data.state); screen = homeOf(); render(); }
+        if (data.state) { S = normalizeState(data.state); screen = entryScreen(); render(); }
       }).catch(function (e) { toast(e.message); });
     },
-    start: function () { draft = { step: 1 }; go("trip"); },
+    start: function () {
+      if (needOnboarding()) {
+        window._onbStep = 1;
+        go("welcome");
+        toast("Сначала заполните профиль");
+        return;
+      }
+      draft = { step: 1 };
+      go("trip");
+    },
     "pickup-next": function () {
       var pickup = val("pickup");
       if (pickup.length < 3) { toast("Укажите адрес"); return; }
@@ -850,8 +916,63 @@
     },
     "send-msg": function (el) { closeSheet(); run({ op: "order.chat", id: Number(el.dataset.id), text: val("msg") }); },
     call: function (el) { toast(el.dataset.phone ? "Номер " + el.dataset.phone : "Номера нет"); },
-    "sheet-profile": function () { sheet("<h2>Профиль</h2>" + field("pname", "Имя", S.user.name, "") + field("pphone", "Телефон", S.user.phone, "") + '<button class="btn" data-act="save-profile">Сохранить</button>'); },
-    "save-profile": function () { closeSheet(); run({ op: "profile", name: val("pname"), phone: val("pphone") }); },
+    "onb-next": function () {
+      var step = window._onbStep || 1;
+      if (step === 1) {
+        var name = val("onb_name");
+        if (name.length < 2) { toast("Введите имя"); return; }
+        window._onbName = name;
+        window._onbStep = 2;
+        render();
+        return;
+      }
+      if (step === 2) {
+        var phone = val("onb_phone");
+        var digits = phone.replace(/\D/g, "");
+        if (digits.length < 10) { toast("Введите телефон полностью"); return; }
+        window._onbPhone = phone;
+        window._onbStep = 3;
+        render();
+        return;
+      }
+    },
+    "onb-back": function () {
+      window._onbStep = Math.max(1, (window._onbStep || 3) - 1);
+      render();
+    },
+    "onb-finish": function () {
+      var city = val("onb_city");
+      if (city.length < 2) { toast("Укажите город"); return; }
+      run({
+        op: "profile",
+        name: window._onbName || val("onb_name"),
+        phone: window._onbPhone || val("onb_phone"),
+        home_city: city
+      }).then(function (ok) {
+        if (!ok) return;
+        window._onbStep = null;
+        toast("Профиль сохранён");
+        stack = [];
+        screen = homeOf();
+        render();
+      });
+    },
+    "sheet-profile": function () {
+      sheet("<h2>Профиль</h2>" +
+        field("pname", "Имя", S.user.name, "") +
+        field("pphone", "Телефон", S.user.phone, "") +
+        field("pcity", "Город", S.user.home_city, "Черногорск") +
+        '<button class="btn" data-act="save-profile">Сохранить</button>');
+    },
+    "save-profile": function () {
+      closeSheet();
+      run({
+        op: "profile",
+        name: val("pname"),
+        phone: val("pphone"),
+        home_city: val("pcity")
+      });
+    },
     apply: function () { run({ op: "driver.apply", car: val("car"), plate: val("plate"), color: val("color") }); },
     period: function (el) { period = el.dataset.p; render(); },
     dperiod: function (el) { driverPeriod = el.dataset.p; render(); },
@@ -1023,7 +1144,7 @@
         return;
       }
     }
-    screen = homeOf();
+    screen = entryScreen();
     render();
     setTimeout(hideSplash, 420);
   }).catch(function (err) {
@@ -1033,7 +1154,7 @@
           S = normalizeState(data.state);
           if (maxUser) window.Maximus.storeUser(maxUser);
           setSplashRole(S.user.role);
-          screen = homeOf();
+          screen = entryScreen();
           render();
           setTimeout(hideSplash, 420);
         }
