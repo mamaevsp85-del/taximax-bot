@@ -18,9 +18,14 @@ from handlers.driver import register_driver
 from handlers.admin import register_admin
 
 logger = logging.getLogger("api_server")
+
+
+storage.storage = storage.Storage()
 # Try to import MaximusTaxi server functions
 try:
     import maximus_server
+    # Ensure maximus_server uses the same storage instance as api_server
+    maximus_server.S = storage.storage
     state_for = maximus_server.state_for
     act = maximus_server.act
     HAS_MAXIMUS = True
@@ -31,7 +36,6 @@ except Exception as e:
     act = None
     HAS_MAXIMUS = False
 
-storage.storage = storage.Storage()
 
 client = MaxClient()
 router = Router(client)
