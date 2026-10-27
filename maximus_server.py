@@ -553,20 +553,6 @@ def act(uid: int, body: dict) -> dict:
             raise ValueError("Нет активной смены")
         S.set_online_status(uid, status)
         return {"ok": True}
-    if op == "geo.resolve":
-        if body.get("address"):
-            text = str(body.get("address") or "").strip()
-            coords, city = run(geocoder.geocode_address(text))
-            if not coords:
-                raise ValueError("Адрес не найден")
-            return {"ok": True, "lat": coords["lat"], "lon": coords["lon"], "address": text, "city": city or ""}
-        lat, lon = float(body.get("lat")), float(body.get("lon"))
-        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-            raise ValueError("Некорректные координаты")
-        address, city = run(geocoder.get_address_by_coordinates(lat, lon))
-        if not address:
-            address = f"{lat:.5f}, {lon:.5f}"
-        return {"ok": True, "lat": lat, "lon": lon, "address": address, "city": city or ""}
     if op == "driver.geo":
         must_role(uid, "driver")
         lat, lon = float(body["lat"]), float(body["lon"])
