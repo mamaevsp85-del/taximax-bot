@@ -218,10 +218,13 @@ class Storage:
         active = u.get("active_role", ROLE_PASSENGER)
         roles = self.compute_roles(user_id)
         if active not in roles:
-            active = ROLE_PASSENGER
-        # Admins default to admin role (unless passenger_removed is explicitly False)
-        if ROLE_ADMIN in roles and active == ROLE_PASSENGER:
-            active = ROLE_ADMIN
+            # Default to first available role
+            if ROLE_ADMIN in roles:
+                active = ROLE_ADMIN
+            elif ROLE_DRIVER in roles:
+                active = ROLE_DRIVER
+            else:
+                active = ROLE_PASSENGER
         return active
 
     def set_active_role(self, user_id: int, role: str) -> bool:
