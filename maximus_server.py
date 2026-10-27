@@ -439,10 +439,6 @@ def act(uid: int, body: dict) -> dict:
         if not address:
             address = f"{lat:.5f}, {lon:.5f}"
         return {"ok": True, "lat": lat, "lon": lon, "address": address, "city": city or ""}
-    if not uid:
-        return {"ok": True, "user_id": user_id}
-    if not uid:
-        raise PermissionError("Сначала выберите профиль")
     if op == "role":
         role = body.get("role")
         if not S.set_active_role(uid, role):
