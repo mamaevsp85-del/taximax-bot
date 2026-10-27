@@ -41,7 +41,17 @@ PORT = 8765
 
 
 def run(coro):
-    return asyncio.run(coro)
+    """Безопасно выполняет корутину, независимо от того, запущен ли event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # Нет запущенного event loop (например, бот с ThreadingHTTPServer)
+        return asyncio.run(coro)
+    # Есть запущенный event loop (например, aiohttp в api_server.py)
+    # Запускаем корутину в отдельном потоке, чтобы не блокировать текущий loop
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 def uid_from(handler) -> int:
