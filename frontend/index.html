@@ -3,13 +3,59 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#FFD000">
+  <meta name="theme-color" content="#0F1115">
   <title>Maximus Taxi</title>
   <link rel="stylesheet" href="assets/fonts/fonts.css">
-  <link rel="stylesheet" href="css/app.css?v=5">
+  <link rel="stylesheet" href="css/app.css?v=8">
+  <link rel="stylesheet" href="css/splash.css?v=8">
   <link rel="icon" href="assets/logo.jpg">
 </head>
 <body>
+  <!-- ==================== ЗАСТАВКА ==================== -->
+  <div class="splash" id="splash" data-role="passenger">
+    <div class="splash-glow"></div>
+
+    <div class="splash-stage">
+      <!-- Пассажир: город, дорога, такси -->
+      <div class="scene" data-scene="passenger">
+        <div class="skyline"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="cab">
+          <span class="cab-roof"></span>
+          <span class="cab-checker"></span>
+          <span class="cab-window"></span>
+          <span class="wheel left"></span>
+          <span class="wheel right"></span>
+        </div>
+        <div class="road"><span class="road-line"></span></div>
+      </div>
+
+      <!-- Водитель: маршрут, руль -->
+      <div class="scene" data-scene="driver">
+        <div class="orbit"><span class="orbit-dot"></span></div>
+        <div class="wheel-hub"><i></i><i></i><i></i></div>
+        <div class="route-line"><i></i><i></i><i></i></div>
+      </div>
+
+      <!-- Админ: панели, графики -->
+      <div class="scene" data-scene="admin">
+        <div class="panel p1"></div>
+        <div class="panel p2"></div>
+        <div class="panel p3"></div>
+        <div class="panel p4"></div>
+        <div class="bars"><i></i><i></i><i></i><i></i></div>
+      </div>
+    </div>
+
+    <div class="splash-copy">
+      <div class="splash-mark"><img src="assets/logo.jpg" alt=""></div>
+      <h1 class="splash-title">Maximus<span>TAXI</span></h1>
+      <p class="splash-sub" id="splash-sub">Готовим машину…</p>
+    </div>
+
+    <div class="splash-progress"><i></i></div>
+  </div>
+
+  <!-- ==================== ПРИЛОЖЕНИЕ ==================== -->
   <div class="stage">
     <div class="shell" id="shell">
       <header class="top" id="top"></header>
@@ -17,12 +63,15 @@
       <nav class="tabs" id="tabs"></nav>
     </div>
   </div>
+
   <div class="toast" id="toast" hidden></div>
   <div class="sheet-back" id="sheet-back" hidden>
     <div class="sheet" id="sheet" role="dialog"></div>
   </div>
+
   <script src="js/max-web-app.js"></script>
   <script src="js/bridge.js"></script>
-  <script src="js/app.js?v=5"></script>
+  <script src="js/app.js?v=8"></script>
 </body>
 </html>
+

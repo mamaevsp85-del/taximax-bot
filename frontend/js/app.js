@@ -7,6 +7,56 @@
   var period = "today";
   var driverPeriod = "day";
 
+  // ==================== ЗАСТАВКА ====================
+  var splashEl = document.getElementById("splash");
+  var splashSub = document.getElementById("splash-sub");
+  var SPLASH_TEXT = {
+    passenger: ["Готовим машину…", "Строим маршрут…", "Ищем водителя поблизости…"],
+    driver: ["Выходим на линию…", "Загружаем заказы…", "Проверяем доступ…"],
+    admin: ["Загружаем панель…", "Считаем статистику…", "Подключаем водителей…"]
+  };
+  var splashTimer = null;
+
+  function setSplashRole(role) {
+    if (!splashEl) return;
+    var safe = SPLASH_TEXT[role] ? role : "passenger";
+    if (splashEl.dataset.role === safe) return;
+    splashEl.dataset.role = safe;
+    document.body.dataset.role = safe;
+    var lines = SPLASH_TEXT[safe];
+    var i = 0;
+    if (splashSub) splashSub.textContent = lines[0];
+    clearInterval(splashTimer);
+    splashTimer = setInterval(function () {
+      i = (i + 1) % lines.length;
+      if (splashSub) {
+        splashSub.style.opacity = "0";
+        setTimeout(function () {
+          splashSub.textContent = lines[i];
+          splashSub.style.opacity = "1";
+        }, 160);
+      }
+    }, 1300);
+  }
+
+  function hideSplash() {
+    if (!splashEl || splashEl.classList.contains("hide")) return;
+    clearInterval(splashTimer);
+    splashEl.classList.add("hide");
+    setTimeout(function () {
+      if (splashEl && splashEl.parentNode) splashEl.parentNode.removeChild(splashEl);
+      splashEl = null;
+    }, 620);
+  }
+
+  // Стартовая роль из диплинка — до получения состояния
+  (function () {
+    var params = new URLSearchParams(window.location.search);
+    var sp = (window.Maximus && window.Maximus.startParam && window.Maximus.startParam())
+             || params.get("startapp") || "";
+    if (SPLASH_TEXT[sp]) setSplashRole(sp);
+  })();
+
   function $(id) { return document.getElementById(id); }
   function esc(s) {
     return String(s == null ? "" : s)
@@ -615,6 +665,9 @@
   }
 
   function render() {
+    if (S && S.user && S.user.role) {
+      document.body.dataset.role = S.user.role;
+    }
     $("top").innerHTML = header();
     $("tabs").innerHTML = tabs();
     var fn = views[screen];
@@ -644,6 +697,7 @@
       stack = [];
       run({ op: "role", role: next }).then(function (ok) {
         if (!ok) return;
+        setSplashRole(next);
         screen = homeOf();
         render();
       });
@@ -811,6 +865,8 @@
   window.Maximus.ready();
   var maxUser = window.Maximus.user();
   var start = window.Maximus.startParam();
+  // Страховка: заставка не должна висеть дольше 6 секунд
+  setTimeout(hideSplash, 6000);
   // Also check URL parameters for uid (MAX may pass it via URL)
   var urlParams = new URLSearchParams(window.location.search);
   var urlUid = urlParams.get('uid') || urlParams.get('user_id') || '';
@@ -823,24 +879,40 @@
   }
   api(stateUrl).then(function (data) {
     S = normalizeState(data);
+    setSplashRole(S.user.role);
     if (start === "driver" || start === "admin" || start === "passenger") {
       if (S.user.roles.indexOf(start) >= 0 && S.user.role !== start) {
-        run({ op: "role", role: start });
+        run({ op: "role", role: start }).then(function () {
+          setSplashRole(S.user.role);
+          screen = homeOf();
+          render();
+          setTimeout(hideSplash, 420);
+        });
         return;
       }
     }
     screen = homeOf();
     render();
+    setTimeout(hideSplash, 420);
   }).catch(function (err) {
     if (maxUser && maxUser.id) {
       api("/api/act", { op: "login", max_id: maxUser.id, name: maxUser.name }).then(function (data) {
-        if (data.state) { S = normalizeState(data.state); if (maxUser) window.Maximus.storeUser(maxUser); screen = homeOf(); render(); }
+        if (data.state) {
+          S = normalizeState(data.state);
+          if (maxUser) window.Maximus.storeUser(maxUser);
+          setSplashRole(S.user.role);
+          screen = homeOf();
+          render();
+          setTimeout(hideSplash, 420);
+        }
       }).catch(function (e2) {
         showPeople();
+        setTimeout(hideSplash, 300);
       });
       return;
     }
     showPeople();
+    setTimeout(hideSplash, 300);
   });
 
   setInterval(function () {
