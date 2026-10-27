@@ -52,6 +52,7 @@
   font-family: Manrope, "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  color-scheme: light;
 }
 
 body[data-role="driver"] {
@@ -639,25 +640,48 @@ label.field span {
   text-transform: uppercase;
 }
 
-input[type="text"], input[type="tel"], input[type="number"] {
+/* Поля ввода: явный тёмный текст на белом фоне */
+input,
+input[type="text"],
+input[type="tel"],
+input[type="number"],
+input[type="search"],
+input[type="email"],
+textarea,
+select {
   width: 100%;
   border: 1.5px solid var(--line-2);
-  background: var(--surface);
+  background: #ffffff;
   border-radius: 13px;
   padding: 15px;
   font-weight: 700;
   font-size: 15px;
   outline: none;
-  color: var(--text);
+  color: #101828;
+  -webkit-text-fill-color: #101828;
+  caret-color: #101828;
   box-shadow: var(--shadow-xs);
   transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease);
+  -webkit-appearance: none;
+  appearance: none;
 }
 
-input::placeholder { color: var(--text-3); font-weight: 600; }
+input::placeholder,
+textarea::placeholder {
+  color: #98a2b3;
+  -webkit-text-fill-color: #98a2b3;
+  font-weight: 600;
+  opacity: 1;
+}
 
-input:focus {
+input:focus,
+textarea:focus,
+select:focus {
   border-color: var(--accent-2);
   box-shadow: 0 0 0 3px rgba(255, 204, 0, 0.22);
+  background: #ffffff;
+  color: #101828;
+  -webkit-text-fill-color: #101828;
 }
 
 /* =========================================================
