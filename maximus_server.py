@@ -164,6 +164,7 @@ def user_card(uid: int) -> dict:
         "profile_complete": _profile_complete(u),
         "onboarded": bool(u.get("onboarded")),
         "needs_onboarding": _needs_onboarding(u),
+        "bot_link": _bot_link(),
         "rating": u.get("rating", 5),
         "roles": S.compute_roles(uid),
         "role": S.get_active_role(uid),
@@ -394,6 +395,17 @@ def quote(pickup: str, dest: str, stop: str = "",
     return run(work())
 
 
+def _bot_link() -> str:
+    """Ссылка на чат с ботом в MAX (для возврата из мини-приложения)."""
+    link = (S.admin_data.get("bot_link") or "").strip()
+    if link:
+        return link
+    username = (S.admin_data.get("bot_username") or "").strip().lstrip("@")
+    if username:
+        return f"https://max.ru/{username}"
+    return ""
+
+
 def _send_geo_prompt(user_id: int, kind: str = "pickup") -> None:
     """Бот присылает в чат кнопку «Отправить геолокацию» (нативная MAX)."""
     import threading
@@ -409,7 +421,7 @@ def _send_geo_prompt(user_id: int, kind: str = "pickup") -> None:
 
 async def _geo_prompt_async(user_id: int, kind: str) -> None:
     from max_api.client import MaxClient
-    from max_api.keyboards import inline_keyboard, keyboard_attachment, request_geo_location_button
+    from max_api.keyboards import keyboard_attachment, request_geo_location_button
 
     label = "точку подачи" if kind == "pickup" else "точку назначения"
     client = MaxClient()
@@ -417,7 +429,8 @@ async def _geo_prompt_async(user_id: int, kind: str) -> None:
         await client.send_message(
             user_id=user_id,
             text=(f"📍 <b>Отправьте {label}</b>\n\n"
-                  "Нажмите кнопку ниже — приложение подхватит адрес автоматически."),
+                  "Нажмите кнопку ниже — приложение сразу подставит адрес.\n"
+                  "После отправки вернитесь в мини-приложение."),
             attachments=keyboard_attachment(
                 [[request_geo_location_button("📍 Отправить геолокацию", quick=True)]]),
         )

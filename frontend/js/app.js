@@ -755,12 +755,23 @@
     if (typeof onReady === "function") onReady(mapDraft);
   }
 
-  // Гео через бота: просим прислать кнопку в чат и ждём точку
+  // ГЕО ЧЕРЕЗ БОТ: закрываем мини-апп, в чате уже лежит кнопка гео
   function requestGeoViaBot(kind, onDone, onFail) {
     var attempts = 0;
     var maxAttempts = 40;  // ~2 минуты
 
     api("/api/act", { op: "geo.request", kind: kind || "pickup" }).then(function () {
+      // Пруток: закрываем мини-апп — пользователь попадает в чат с ботом,
+      // где уже ждёт нативная кнопка «Отправить геолокацию»
+      var closed = window.Maximus.close ? window.Maximus.close() : false;
+
+      if (!closed && window.Maximus.openBotChat) {
+        // Резерв: пробуем открыть чат по прямой ссылке
+        window.Maximus.openBotChat(S && S.user && S.user.bot_link);
+      }
+
+      // На случай, если мост не сработал — продолжаем опрос,
+      // чтобы подхватить гео, когда пользователь вернётся вручную
       var timer = setInterval(function () {
         attempts++;
         if (attempts > maxAttempts) {
@@ -783,6 +794,29 @@
       if (onFail) onFail();
     });
   }
+
+  // Подхватываем гео, если пользователь вернулся в приложение после отправки
+  function checkPendingGeo() {
+    if (!S || !S.user) return;
+    api("/api/act", { op: "geo.poll" }).then(function (res) {
+      if (res.status !== "done") return;
+      api("/api/act", { op: "geo.cancel" }).catch(function () {});
+      var input = document.getElementById("pickup");
+      if (input && res.address) {
+        input.value = res.address;
+        draft = draft || {};
+        draft.pickup = res.address;
+        draft.pickup_coords = { lat: res.lat, lon: res.lon };
+        toast("Адрес подставлен: " + res.address);
+      }
+    }).catch(function () {});
+  }
+
+  // При возврате в приложение (из чата) проверяем, не пришло ли гео
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) checkPendingGeo();
+  });
+  window.addEventListener("focus", checkPendingGeo);
   // Открывает карту и сразу запрашивает гео через бота
   function needPoint(done) {
     openMap(done, function (map) {

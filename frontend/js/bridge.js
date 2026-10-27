@@ -97,6 +97,36 @@
         else window.open(url, "_blank");
       });
       if (!app()) window.open(url, "_blank");
+    },
+
+    /**
+     * ПРУТОК: закрывает мини-приложение и возвращает в чат с ботом.
+     * Там уже лежит сообщение с нативной кнопкой гео — остаётся нажать.
+     */
+    close: function () {
+      var wa = app();
+      if (wa && typeof wa.close === "function") {
+        try { wa.close(); return true; } catch (e) { /* fallback ниже */ }
+      }
+      return false;
+    },
+
+    /** Открывает чат с ботом по прямой ссылке MAX. */
+    openBotChat: function (botLink) {
+      var wa = app();
+      if (wa && typeof wa.openMaxLink === "function" && botLink) {
+        try { wa.openMaxLink(botLink); return true; } catch (e) { /* fallback */ }
+      }
+      if (wa && typeof wa.close === "function") {
+        try { wa.close(); return true; } catch (e) { /* fallback */ }
+      }
+      if (botLink) window.open(botLink, "_blank");
+      return false;
+    },
+
+    /** Есть ли нативный мост MAX. */
+    hasBridge: function () {
+      return !!app();
     }
   };
 })();
