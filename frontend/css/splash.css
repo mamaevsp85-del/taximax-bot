@@ -263,7 +263,8 @@ button {
 button:active { transform: scale(0.97); opacity: 0.9; }
 
 /* Тема по роли */
-body[data-role="driver"] { --accent: #35e0a1; --accent-2: #14b87d; --accent-soft: rgba(53, 224, 161, 0.14); }
+/* Цвета ролей — только внутри заставки, чтобы не ломать светлую тему приложения */
+.splash[data-role="driver"] { --accent: #35e0a1; --accent-2: #14b87d; --accent-soft: rgba(53, 224, 161, 0.14); }
 
 /* ============ ВОДИТЕЛЬ: маршрут + руль ============ */
 .orbit {
@@ -487,4 +488,4 @@ body[data-role="driver"] { --accent: #35e0a1; --accent-2: #14b87d; --accent-soft
   }
 }
 
-body[data-role="admin"] { --accent: #8b9dff; --accent-2: #6274e8; --accent-soft: rgba(139, 157, 255, 0.14); }
+.splash[data-role="admin"] { --accent: #8b9dff; --accent-2: #6274e8; --accent-soft: rgba(139, 157, 255, 0.14); }
