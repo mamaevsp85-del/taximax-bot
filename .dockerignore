@@ -9,10 +9,13 @@ __pycache__
 .venv
 data
 *.log
+# не исключаем requirements.txt — он нужен на этапе COPY
 *.txt
+!requirements.txt
 tests
 _debug_archive
 ngrok*
 *.zip
 *.bat
 *.ps1
+
