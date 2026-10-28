@@ -1088,10 +1088,17 @@ class Handler(BaseHTTPRequestHandler):
                 people.sort(key=lambda p: p["name"])
                 self.send_json(200, {"ok": True, "people": people})
                 return
+            if path == "/api/whoami":
+                # Кого сервер видит по cookie (для восстановления сессии)
+                uid = uid_from(self)
+                self.send_json(200, {"ok": True, "uid": uid})
+                return
             if path == "/api/state":
                 uid = uid_from(self)
                 if not uid:
-                    self.send_json(401, {"ok": False, "error": "Нет сессии"})
+                    # Нет сессии — отдаём пустой ответ вместо 401,
+                    # чтобы приложение показало выбор профиля, а не падало
+                    self.send_json(200, {"ok": False, "error": "Нет сессии"})
                     return
                 if uid not in S.users:
                     S.ensure_user(uid)

@@ -644,7 +644,15 @@
     var n = Number(id) || 0;
     if (n > 0) {
       try {
-        document.cookie = UID_KEY + "=" + n + "; path=/; max-age=31536000; SameSite=Lax";
+        // SameSite=None обязателен: мини-апп открывается в iframe,
+        // а Lax-cookie там блокируются как сторонние.
+        var secure = window.isSecureContext ? "; Secure" : "";
+        document.cookie = UID_KEY + "=" + n +
+          "; path=/; max-age=31536000; SameSite=None" + secure;
+        // Дублируем без Secure — для локальной отладки по http
+        if (!secure) {
+          document.cookie = UID_KEY + "=" + n + "; path=/; max-age=31536000; SameSite=Lax";
+        }
       } catch (e) {}
     }
     return n;
@@ -1017,7 +1025,21 @@
     stateUrl += "?uid=" + maxUser.id;
   }
   api(stateUrl).then(function (data) {
+    if (!data || data.ok === false) {
+      // Нет сессии — пробуем восстановить по cookie или показать выбор профиля
+      api("/api/whoami").then(function (who) {
+        if (who && who.uid) { doLogin(who.uid, ""); return; }
+        showPeople();
+        setTimeout(hideSplash, 300);
+      }).catch(function () {
+        showPeople();
+        setTimeout(hideSplash, 300);
+      });
+      return;
+    }
     S = normalizeState(data);
+    rememberUid(S.user.id);
+    rememberUidCookie(S.user.id);
     setSplashRole(S.user.role);
     if (start === "driver" || start === "admin" || start === "passenger") {
       if (S.user.roles.indexOf(start) >= 0 && S.user.role !== start) {
@@ -1034,18 +1056,13 @@
     render();
     setTimeout(hideSplash, 420);
   }).catch(function (err) {
-    // Не смогли получить состояние — пробуем войти по известному uid
-    var fallbackId = (maxUser && maxUser.id) || savedUid();
-    if (fallbackId) {
-      api("/api/act", { op: "login", max_id: fallbackId, name: (maxUser && maxUser.name) || "" }).then(function (data) {
-        if (data.state) {
-          S = normalizeState(data.state);
-          rememberUid(fallbackId);
-          if (maxUser) window.Maximus.storeUser(maxUser);
-          setSplashRole(S.user.role);
-          screen = entryScreen();
-          render();
-          setTimeout(hideSplash, 420);
+    // Не смогли получить состояние — пробуем войти по любому известному uid
+    var fallbackId = (maxUser && maxUser.id) || savedUid() || savedUidCookie();
+    if (!fallbackId) {
+      // Последняя попытка: спросить сервер, кого он видит по cookie
+      api("/api/whoami").then(function (who) {
+        if (who && who.uid) {
+          doLogin(who.uid, "");
           return;
         }
         showPeople();
@@ -1056,9 +1073,28 @@
       });
       return;
     }
-    showPeople();
-    setTimeout(hideSplash, 300);
+    doLogin(fallbackId, (maxUser && maxUser.name) || "");
   });
+
+  function doLogin(uid, name) {
+    api("/api/act", { op: "login", max_id: uid, name: name }).then(function (data) {
+      if (data.state) {
+        S = normalizeState(data.state);
+        rememberUid(uid);
+        rememberUidCookie(uid);
+        setSplashRole(S.user.role);
+        screen = entryScreen();
+        render();
+        setTimeout(hideSplash, 420);
+        return;
+      }
+      showPeople();
+      setTimeout(hideSplash, 300);
+    }).catch(function () {
+      showPeople();
+      setTimeout(hideSplash, 300);
+    });
+  }
 
   // ==================== KEEP-ALIVE ====================
   // Приложение не должно «засыпать»: держим сессию активной и
