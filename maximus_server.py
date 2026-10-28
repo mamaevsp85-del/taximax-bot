@@ -141,18 +141,17 @@ def _normalize_phone(phone: str) -> str:
 
 
 def _profile_complete(user: dict) -> bool:
-    """Профиль заполнен: имя, телефон и родной город."""
+    """Профиль заполнен: имя и телефон. Город — желателен, но не обязателен."""
     name = (user.get("name") or "").strip()
     phone = "".join(ch for ch in str(user.get("phone") or "") if ch.isdigit())
-    city = (user.get("home_city") or "").strip()
-    return bool(name and len(phone) >= 10 and city)
+    return bool(name and len(phone) >= 10)
 
 
 def _needs_onboarding(user: dict) -> bool:
     """Знакомство показываем ровно один раз.
 
-    Если пользователь уже проходил его (флаг onboarded) — больше не спрашиваем,
-    даже если какие-то поля пустые: он сам может дозаполнить в профиле.
+    Достаточно имени и телефона — их собирает и бот, и мини-апп.
+    Если пользователь уже проходил знакомство (флаг onboarded) — не спрашиваем.
     """
     if user.get("onboarded"):
         return False
@@ -1089,9 +1088,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"ok": True, "people": people})
                 return
             if path == "/api/whoami":
-                # Кого сервер видит по cookie (для восстановления сессии)
+                # Кого сервер видит: cookie -> последний писавший боту
                 uid = uid_from(self)
-                self.send_json(200, {"ok": True, "uid": uid})
+                source = "cookie"
+                if not uid:
+                    uid = S.get_bot_user() or 0
+                    source = "bot" if uid else "none"
+                self.send_json(200, {"ok": True, "uid": uid, "source": source})
                 return
             if path == "/api/state":
                 uid = uid_from(self)

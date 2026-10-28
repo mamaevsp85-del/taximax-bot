@@ -535,6 +535,42 @@ class Storage:
                 u["onboarded"] = True
                 self.save()
 
+    # ==================== МОСТ «БОТ -> МИНИ-АПП» ====================
+    def touch_bot_user(self, user_id: int, ttl_minutes: int = 60) -> None:
+        """Запоминает, кто последним писал боту.
+
+        Мини-апп открывается в iframe, где MAX часто не передаёт initData.
+        Тогда приложение спрашивает /api/whoami и получает этот ID.
+        """
+        uid = int(user_id)
+        if uid <= 0:
+            return
+        with self._lock:
+            self.admin_data["last_bot_user"] = {
+                "user_id": uid,
+                "at": datetime.now().isoformat(),
+                "expires_at": (datetime.now() + timedelta(minutes=ttl_minutes)).isoformat(),
+            }
+            self.save()
+
+    def get_bot_user(self) -> Optional[int]:
+        """ID последнего пользователя, писавшего боту (если не устарел)."""
+        rec = self.admin_data.get("last_bot_user") or {}
+        if not rec:
+            return None
+        exp = rec.get("expires_at")
+        if exp:
+            try:
+                if datetime.now() > datetime.fromisoformat(exp):
+                    return None
+            except Exception:
+                pass
+        try:
+            uid = int(rec.get("user_id") or 0)
+        except (TypeError, ValueError):
+            return None
+        return uid if uid > 0 else None
+
     # ==================== РЕЛЕЙ-СЕССИИ (персистентные) ====================
     def set_relay_session(self, user_id: int, partner_id: int, order_id: int,
                           hours: float = 24.0) -> None:

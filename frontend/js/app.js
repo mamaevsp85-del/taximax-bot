@@ -363,7 +363,7 @@
       }
       return head +
         '<h2>Ваш город</h2>' +
-        '<p class="muted">Откуда вы обычно заказываете такси.</p>' +
+        '<p class="muted">Откуда вы обычно заказываете такси. Можно пропустить.</p>' +
         field("onb_city", "Город", u.home_city || "", "Например, Абакан") +
         '<button class="btn" data-act="onb-finish">Готово, поехали</button>' +
         '<button class="btn ghost" data-act="onb-back">Назад</button>';
@@ -906,7 +906,6 @@
     },
     "onb-finish": function () {
       var city = val("onb_city");
-      if (city.length < 2) { toast("Укажите город"); return; }
       run({
         op: "profile",
         name: window._onbName || val("onb_name"),
@@ -1026,7 +1025,7 @@
   }
   api(stateUrl).then(function (data) {
     if (!data || data.ok === false) {
-      // Нет сессии — пробуем восстановить по cookie или показать выбор профиля
+      // Нет сессии — спрашиваем сервер, кого он видит (cookie или бот)
       api("/api/whoami").then(function (who) {
         if (who && who.uid) { doLogin(who.uid, ""); return; }
         showPeople();

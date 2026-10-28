@@ -38,10 +38,12 @@ class ProfileGateTests(unittest.TestCase):
         self.s.ensure_user(10, name="Иван")
         self.assertFalse(self.srv._profile_complete(self.s.get_user(10)))
 
-    def test_name_and_phone_incomplete_without_city(self):
+    def test_name_and_phone_complete_without_city(self):
+        """Город необязателен: имени и телефона достаточно."""
         self.s.ensure_user(10, name="Иван")
         self.s.update_user(10, phone="79134430404")
-        self.assertFalse(self.srv._profile_complete(self.s.get_user(10)))
+        self.assertTrue(self.srv._profile_complete(self.s.get_user(10)))
+        self.assertFalse(self.srv._needs_onboarding(self.s.get_user(10)))
 
     def test_full_profile_complete(self):
         self.s.ensure_user(10, name="Иван")

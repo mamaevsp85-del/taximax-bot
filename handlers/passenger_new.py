@@ -143,6 +143,8 @@ def register_passenger(router: Router) -> None:
                                              keyboard=[[request_contact_button("📱 Отправить мой номер")]])
             return
         S.update_user(user_id, phone=_normalize_phone(sanitize_input(phone)))
+        # Помечаем знакомство пройденным — мини-апп больше не спросит
+        S.mark_onboarded(user_id)
         await fsm.clear()
         await _menu(client, user_id).send(
             "✅ Профиль заполнен!\n\n"
