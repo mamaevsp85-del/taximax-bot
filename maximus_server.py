@@ -689,6 +689,15 @@ def act(uid: int, body: dict) -> dict:
         logger.info("Диагностика клиента %s: %s", uid, S.admin_data["client_diag"][str(uid)])
         return {"ok": True}
 
+    if op == "session.ping":
+        # Пинг для поддержания активности мини-приложения
+        if not uid:
+            return {"ok": True}
+        u = S.get_user(uid) or {}
+        if u:
+            S.update_user(uid, last_active=datetime.now().isoformat())
+        return {"ok": True}
+
     if op == "geo.suggest":
         # Подсказки адреса при вводе (автодополнение)
         query = str(body.get("query") or "").strip()

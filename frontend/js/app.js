@@ -1,4 +1,4 @@
-﻿(function () {
+(function () {
   var S = null;
   var screen = "home";
   var stack = [];
@@ -279,7 +279,7 @@
       var step = (draft && draft.step) || 1;
       var bars = [1, 2, 3].map(function (n) { return '<i class="' + (n <= step ? "on" : "") + '"></i>'; }).join("");
       if (step === 1) return "<h2>Адрес подачи</h2><div class=\"steps\">" + bars + "</div>" + field("pickup", "Откуда", draft && draft.pickup, "Город, улица, дом") +
-        '<button class="btn ghost" data-act="geo-pickup">Моя геолокация</button><button class="btn" data-act="pickup-next">Дальше</button>';
+        '<button class="btn" data-act="pickup-next">Дальше</button>';
       if (step === 2) return "<h2>Куда</h2><div class=\"steps\">" + bars + "</div><p class=\"muted\">Подача: " + esc(draft.pickup) + "</p>" +
         field("dest", "Назначение", draft.destination, "Город, улица, дом") + '<button class="btn" data-act="dest-next">Посчитать</button>';
       if (draft.pending) return "<h2>Подтверждение</h2><div class=\"steps\">" + bars + "</div><div class=\"card\" style=\"margin-top:0\"><div class=\"route\">" +
@@ -402,7 +402,6 @@
         '<div class="grid">' +
         tile("d-orders", "☰", "Список заказов", "свободные рядом") +
         tile("d-current", "▶", "Текущий рейс", S.driver.current ? "заказ #" + S.driver.current.id : "нет рейса") +
-        tile("d-geo", "⌖", "Геопозиция", "обновить точку") +
         tile("d-profile", "☺", "Профиль", "авто, баланс, документы") +
         "</div>";
     },
@@ -426,11 +425,6 @@
         actions + '<div class="btn-row"><button class="btn ghost" data-act="nav" data-q="' + esc(o.status === "in_progress" ? o.destination : o.pickup) +
         '">Навигация</button><button class="btn ghost" data-act="sheet-chat" data-id="' + o.id + '">Пассажир</button></div>' +
         (["accepted", "driver_arrived", "in_progress", "pending"].indexOf(o.status) >= 0 ? '<button class="btn danger" data-act="d-cancel" data-id="' + o.id + '">Отменить заказ</button>' : "");
-    },
-    "d-geo": function () {
-      return "<h2>Обновить гео</h2><p class=\"muted\">" + esc(S.user.geo || "Точка ещё не отправлялась") +
-        "</p><p class=\"muted\">Если телефон не отдал координаты, точку можно сдвинуть на карте.</p>" +
-        '<button class="btn" data-act="save-geo">Отправить геопозицию</button>';
     },
     "d-profile": function () {
       var hidden = S.user.balance_hidden;
@@ -621,361 +615,6 @@
   }
   function closeSheet() { $("sheet-back").hidden = true; }
 
-  var mapDraft = null;
-  var mapDone = null;
-  var MAP_Z = 15;
-  function mapWorld(lat, lon) {
-    var n = Math.pow(2, MAP_Z);
-    var rad = lat * Math.PI / 180;
-    return {
-      x: (lon + 180) / 360 * n,
-      y: (1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2 * n
-    };
-  }
-  function mapUnworld(x, y) {
-    var n = Math.pow(2, MAP_Z);
-    return {
-      lon: x / n * 360 - 180,
-      lat: Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI
-    };
-  }
-  function paintMap() {
-    var box = document.getElementById("pick-map");
-    var tiles = document.getElementById("pick-tiles");
-    if (!box || !tiles || !mapDraft) return;
-    var w = box.clientWidth || 320;
-    var h = box.clientHeight || 260;
-    var c = mapWorld(mapDraft.lat, mapDraft.lon);
-    var left = c.x * 256 - w / 2;
-    var top = c.y * 256 - h / 2;
-    var x0 = Math.floor(left / 256);
-    var y0 = Math.floor(top / 256);
-    var x1 = Math.floor((left + w) / 256);
-    var y1 = Math.floor((top + h) / 256);
-    var max = Math.pow(2, MAP_Z);
-    var html = "";
-    for (var x = x0; x <= x1; x++) {
-      for (var y = y0; y <= y1; y++) {
-        if (y < 0 || y >= max) continue;
-        var xx = ((x % max) + max) % max;
-        var pos = "left:" + (x * 256 - left) + "px;top:" + (y * 256 - top) + "px";
-        // OSM — основной источник (работает стабильно)
-        html += '<img alt="" src="https://tile.openstreetmap.org/' + MAP_Z + "/" + xx + "/" + y +
-          '.png" style="' + pos + '" data-fb="1" onerror="mapTileFallback(this)">';
-      }
-    }
-    tiles.innerHTML = html;
-  }
-
-  // Фолбэк: если OSM не загрузился, пробуем зеркало
-  window.mapTileFallback = function (img) {
-    if (img.dataset.fb === "2") { img.style.opacity = "0"; return; }
-    img.dataset.fb = "2";
-    img.src = img.src.replace("tile.openstreetmap.org", "a.tile.openstreetmap.fr/osmfr");
-  };
-  function bindMap() {
-    var box = document.getElementById("pick-map");
-    if (!box) return;
-    var start = null;
-    box.addEventListener("pointerdown", function (e) {
-      box.setPointerCapture(e.pointerId);
-      start = { x: e.clientX, y: e.clientY, lat: mapDraft.lat, lon: mapDraft.lon };
-    });
-    box.addEventListener("pointermove", function (e) {
-      if (!start) return;
-      var c = mapWorld(start.lat, start.lon);
-      mapDraft = mapUnworld(c.x - (e.clientX - start.x) / 256, c.y - (e.clientY - start.y) / 256);
-      paintMap();
-    });
-    box.addEventListener("pointerup", function () { start = null; });
-    box.addEventListener("pointercancel", function () { start = null; });
-  }
-  // Центры городов зоны обслуживания (центр населённого пункта, не адрес дома)
-  var CITY_CENTERS = {
-    "черногорск": { lat: 53.8236, lon: 91.3264 },
-    "абакан": { lat: 53.7156, lon: 91.4292 },
-    "минусинск": { lat: 53.7103, lon: 91.6872 },
-    "саяногорск": { lat: 53.0994, lon: 91.4056 },
-    "аскиз": { lat: 53.1333, lon: 90.5333 },
-    "усть-абакан": { lat: 53.8333, lon: 91.3833 },
-    "сорск": { lat: 54.0006, lon: 90.2467 }
-  };
-
-  // Стартовая точка карты: гео пользователя → последний заказ → центр города профиля
-  function mapStartPoint() {
-    var lat = Number(S && S.user && S.user.lat);
-    var lon = Number(S && S.user && S.user.lon);
-    if (lat && lon && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-      return { lat: lat, lon: lon };
-    }
-    var orders = (S && S.passenger && S.passenger.orders) || [];
-    for (var i = 0; i < orders.length; i++) {
-      var o = orders[i];
-      var pc = o && o.pickup_coords;
-      if (pc && pc.lat && pc.lon) return { lat: Number(pc.lat), lon: Number(pc.lon) };
-    }
-    // Центр родного города пользователя
-    var home = (S && S.user && S.user.home_city || "").toLowerCase().trim();
-    if (home && CITY_CENTERS[home]) return CITY_CENTERS[home];
-    for (var key in CITY_CENTERS) {
-      if (home && home.indexOf(key) >= 0) return CITY_CENTERS[key];
-    }
-    // Последний фолбэк — центр Черногорска (город, где работает сервис)
-    return CITY_CENTERS["черногорск"];
-  }
-
-  function openMap(done, onReady) {
-    mapDone = done;
-    var start = mapStartPoint();
-    mapDraft = { lat: start.lat, lon: start.lon };
-
-    sheet('<h2>Ваше местоположение</h2>' +
-      '<p class="muted" id="geo-status">Определяю координаты…</p>' +
-      '<div class="pick-map" id="pick-map">' +
-        '<div class="pick-tiles" id="pick-tiles"></div>' +
-        '<div class="pick-pin"></div>' +
-        '<button class="map-send" data-act="map-ok">' +
-          '<b>Отправить гео</b>' +
-          '<small id="map-send-sub">нажмите, чтобы подтвердить точку</small>' +
-        '</button>' +
-      '</div>' +
-      field("geoaddr", "Адрес", "", "Город, улица, дом") +
-      '<div class="geo-extra">' +
-        '<label class="field"><span>Подъезд</span>' +
-          '<input id="entrance" type="text" inputmode="numeric" placeholder="необязательно" value="">' +
-        '</label>' +
-      '</div>' +
-      '<div class="btn-row">' +
-        '<button class="btn ghost" data-act="map-find">Найти адрес</button>' +
-        '<button class="btn ghost" data-act="map-gps">Моё место</button>' +
-      '</div>');
-
-    paintMap();
-    bindMap();
-    if (typeof onReady === "function") onReady(mapDraft);
-  }
-
-  // Диагностика окружения: какой движок, iframe ли, есть ли гео
-  function sendClientDiag(geoError) {
-    if (!S || !S.user) return;
-    var info = {
-      userAgent: navigator.userAgent || "",
-      platform: (window.WebApp && window.WebApp.platform) || "",
-      isIframe: window.self !== window.top,
-      hasGeolocation: !!navigator.geolocation,
-      geoError: geoError || "",
-      secureContext: !!window.isSecureContext,
-      hasBridge: !!(window.Maximus && window.Maximus.hasBridge && window.Maximus.hasBridge())
-    };
-    api("/api/act", { op: "client.diag", info: info }).catch(function () {});
-  }
-
-  // Проверяем, доступна ли геолокация браузера, и сообщаем на сервер
-  function probeGeolocation() {
-    if (!navigator.geolocation) { sendClientDiag("no-api"); return; }
-    if (!window.isSecureContext) { sendClientDiag("not-secure"); return; }
-    try {
-      navigator.geolocation.getCurrentPosition(
-        function () { sendClientDiag(""); },
-        function (err) { sendClientDiag("code-" + (err && err.code)); },
-        { timeout: 5000, maximumAge: 600000 }
-      );
-    } catch (e) {
-      sendClientDiag("throw-" + (e && e.name));
-    }
-  }
-
-  // ==================== ЗАПОМИНАНИЕ ПОЛЬЗОВАТЕЛЯ ====================
-  var UID_KEY = "maximus_uid";
-
-  function savedUid() {
-    try {
-      var v = localStorage.getItem(UID_KEY);
-      return v ? Number(v) : 0;
-    } catch (e) { return 0; }
-  }
-
-  function rememberUid(id) {
-    var n = Number(id) || 0;
-    if (n > 0) {
-      try { localStorage.setItem(UID_KEY, String(n)); } catch (e) {}
-    }
-    return n;
-  }
-
-  // Сохраняем uid и в cookie — на случай, если localStorage в iframe заблокирован
-  function rememberUidCookie(id) {
-    var n = Number(id) || 0;
-    if (n > 0) {
-      try {
-        document.cookie = UID_KEY + "=" + n + "; path=/; max-age=31536000; SameSite=Lax";
-      } catch (e) {}
-    }
-    return n;
-  }
-
-  function savedUidCookie() {
-    try {
-      var m = document.cookie.match(new RegExp("(?:^|; )" + UID_KEY + "=([^;]*)"));
-      return m ? Number(m[1]) : 0;
-    } catch (e) { return 0; }
-  }
-
-  // ==================== АВТОДОПОЛНЕНИЕ АДРЕСА ====================
-  var _suggestTimer = null;
-  var _suggestSeq = 0;
-
-  function attachSuggest(inputId, onPick, opts) {
-    var input = document.getElementById(inputId);
-    if (!input) return;
-    var options = opts || {};
-
-    var box = document.createElement("div");
-    box.className = "suggest-box";
-    box.hidden = true;
-    input.parentNode.appendChild(box);
-
-    function hide() { box.hidden = true; box.innerHTML = ""; }
-
-    function show(items) {
-      if (!items || !items.length) { hide(); return; }
-      box.innerHTML = items.map(function (it, i) {
-        var icon = it.kind === "house" ? "\ud83c\udfe0" : it.kind === "street" ? "\ud83d\uded23" :
-                   it.kind === "locality" ? "\ud83c\udfd9" : "\ud83d\udccd";
-        return '<button type="button" class="suggest-item" data-i="' + i + '">' +
-          '<i>' + icon + '</i><span><b>' + esc(it.title) + '</b>' +
-          '<small>' + esc(it.subtitle || it.address) + '</small></span></button>';
-      }).join("");
-      box.hidden = false;
-
-      var btns = box.querySelectorAll(".suggest-item");
-      for (var k = 0; k < btns.length; k++) {
-        (function (btn) {
-          btn.addEventListener("click", function (e) {
-            e.preventDefault();
-            var it = items[Number(btn.dataset.i)];
-            input.value = it.title + (it.subtitle ? ", " + it.subtitle.split(",")[0] : "");
-            hide();
-            if (onPick) onPick(it);
-          });
-        })(btns[k]);
-      }
-    }
-
-    function fetchSuggest(query) {
-      var seq = ++_suggestSeq;
-      api("/api/act", {
-        op: "geo.suggest",
-        query: query,
-        city: options.city || (S && S.user && S.user.home_city) || "",
-        lat: options.lat || null,
-        lon: options.lon || null
-      }).then(function (res) {
-        if (seq !== _suggestSeq) return;
-        show(res.items || []);
-      }).catch(function () { hide(); });
-    }
-
-    input.addEventListener("input", function () {
-      var q = input.value.trim();
-      clearTimeout(_suggestTimer);
-      if (q.length < 2) { hide(); return; }
-      _suggestTimer = setTimeout(function () { fetchSuggest(q); }, 320);
-    });
-
-    input.addEventListener("blur", function () {
-      setTimeout(hide, 180);
-    });
-
-    input.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") hide();
-    });
-  }
-
-  // ГЕО ЧЕРЕЗ БОТ: закрываем мини-апп, в чате уже лежит кнопка гео
-  function requestGeoViaBot(kind, onDone, onFail) {
-    var attempts = 0;
-    var maxAttempts = 40;  // ~2 минуты
-
-    api("/api/act", { op: "geo.request", kind: kind || "pickup" }).then(function () {
-      // Пруток: закрываем мини-апп — пользователь попадает в чат с ботом,
-      // где уже ждёт нативная кнопка «Отправить геолокацию»
-      var closed = window.Maximus.close ? window.Maximus.close() : false;
-
-      if (!closed && window.Maximus.openBotChat) {
-        // Резерв: пробуем открыть чат по прямой ссылке
-        window.Maximus.openBotChat(S && S.user && S.user.bot_link);
-      }
-
-      // На случай, если мост не сработал — продолжаем опрос,
-      // чтобы подхватить гео, когда пользователь вернётся вручную
-      var timer = setInterval(function () {
-        attempts++;
-        if (attempts > maxAttempts) {
-          clearInterval(timer);
-          if (onFail) onFail();
-          return;
-        }
-        api("/api/act", { op: "geo.poll" }).then(function (res) {
-          if (res.status === "done") {
-            clearInterval(timer);
-            api("/api/act", { op: "geo.cancel" }).catch(function () {});
-            onDone({ lat: res.lat, lon: res.lon, address: res.address || "" });
-          } else if (res.status === "expired" || res.status === "none") {
-            clearInterval(timer);
-            if (onFail) onFail();
-          }
-        }).catch(function () {});
-      }, 3000);
-    }).catch(function () {
-      if (onFail) onFail();
-    });
-  }
-
-  // Подхватываем гео, если пользователь вернулся в приложение после отправки
-  function checkPendingGeo() {
-    if (!S || !S.user) return;
-    api("/api/act", { op: "geo.poll" }).then(function (res) {
-      if (res.status !== "done") return;
-      api("/api/act", { op: "geo.cancel" }).catch(function () {});
-      var input = document.getElementById("pickup");
-      if (input && res.address) {
-        input.value = res.address;
-        draft = draft || {};
-        draft.pickup = res.address;
-        draft.pickup_coords = { lat: res.lat, lon: res.lon };
-        toast("Адрес подставлен: " + res.address);
-      }
-    }).catch(function () {});
-  }
-
-  // При возврате в приложение (из чата) проверяем, не пришло ли гео
-  document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) checkPendingGeo();
-  });
-  window.addEventListener("focus", checkPendingGeo);
-  // Открывает карту и сразу запрашивает гео через бота
-  function needPoint(done) {
-    openMap(done, function (map) {
-      var lbl = document.getElementById("geo-status");
-      if (lbl) lbl.textContent = "Запросили гео у бота — отправьте точку в чате…";
-      requestGeoViaBot("pickup", function (p) {
-        mapDraft = { lat: p.lat, lon: p.lon, address: p.address };
-        paintMap();
-        var inp = document.getElementById("geoaddr");
-        if (inp && p.address) inp.value = p.address;
-        if (lbl) lbl.textContent = p.address || "Место определено";
-      }, function () {
-        var home = (S && S.user && S.user.home_city) || "";
-        if (lbl) {
-          lbl.textContent = home
-            ? "Карта открыта на " + home + " — сдвиньте её или введите адрес"
-            : "Сдвиньте карту или введите адрес";
-        }
-      });
-    });
-  }
-
   function render() {
     if (S && S.user && S.user.role) {
       document.body.dataset.role = S.user.role;
@@ -998,7 +637,7 @@
         });
       }
     }
-    if (screen === "d-geo" || screen === "d-current") {
+    if (screen === "d-current") {
       attachSuggest("geoaddr", null);
     }
 
@@ -1190,88 +829,7 @@
     wait: function (el) { run({ op: "driver.wait", id: Number(el.dataset.id) }); },
     "start-trip": function (el) { run({ op: "driver.start", id: Number(el.dataset.id) }); },
     complete: function (el) {
-      var id = Number(el.dataset.id);
-      needPoint(function (p) {
-        run({ op: "driver.complete", id: id, lat: p.lat, lon: p.lon });
-      });
-    },
-    "d-cancel": function (el) { run({ op: "driver.cancel", id: Number(el.dataset.id) }); },
-    "save-geo": function () {
-      needPoint(function (p) { run({ op: "driver.geo", lat: p.lat, lon: p.lon }); });
-    },
-    "geo-pickup": function () {
-      toast("Отправьте гео в чат с ботом…");
-      requestGeoViaBot("pickup", function (p) {
-        var input = document.getElementById("pickup");
-        if (input) input.value = p.address || (p.lat.toFixed(5) + ", " + p.lon.toFixed(5));
-        draft.pickup_coords = { lat: p.lat, lon: p.lon };
-        if (p.address) draft.pickup = p.address;
-        toast("Адрес получен");
-      }, function () {
-        toast("Не дождались гео. Откройте чат с ботом и отправьте локацию");
-      });
-    },
-    "map-find": function () {
-      var q = val("geoaddr");
-      if (!q) { toast("Введите адрес"); return; }
-      var lbl = document.getElementById("geo-status");
-      if (lbl) lbl.textContent = "Ищу адрес…";
-      api("/api/act", { op: "geo.resolve", address: q }).then(function (res) {
-        mapDraft = { lat: res.lat, lon: res.lon, address: res.address };
-        paintMap();
-        if (lbl) lbl.textContent = res.address || q;
-      }).catch(function (e) {
-        toast(e.message);
-        if (lbl) lbl.textContent = "Адрес не найден";
-      });
-    },
-    "map-gps": function () {
-      var lbl = document.getElementById("geo-status");
-      if (lbl) lbl.textContent = "Отправьте гео в чат с ботом…";
-      requestGeoViaBot("pickup", function (p) {
-        mapDraft = { lat: p.lat, lon: p.lon, address: p.address };
-        paintMap();
-        var inp = document.getElementById("geoaddr");
-        if (inp && p.address) inp.value = p.address;
-        if (lbl) lbl.textContent = p.address || "Место определено";
-      }, function () {
-        if (lbl) lbl.textContent = "Гео не получено — введите адрес или сдвиньте карту";
-        toast("Откройте чат с ботом и отправьте локацию");
-      });
-    },
-    "map-ok": function () {
-      if (!mapDraft || !mapDone) return;
-      var done = mapDone;
-      var typed = val("geoaddr");
-      var entrance = val("entrance");
-
-      var withEntrance = function (address) {
-        var clean = (address || "").trim();
-        if (!clean || !entrance) return clean;
-        if (/подъезд/i.test(clean)) return clean;
-        return clean + ", подъезд " + entrance;
-      };
-
-      var finish = function (lat, lon, address) {
-        closeSheet();
-        mapDone = null;
-        done({ lat: lat, lon: lon, address: withEntrance(address) });
-      };
-
-      // Если пользователь ввёл адрес — уважаем его
-      if (typed && typed !== mapDraft.address) {
-        api("/api/act", { op: "geo.resolve", address: typed }).then(function (res) {
-          finish(res.lat, res.lon, res.address || typed);
-        }).catch(function () {
-          api("/api/act", { op: "geo.resolve", lat: mapDraft.lat, lon: mapDraft.lon })
-            .then(function (res) { finish(res.lat, res.lon, res.address); })
-            .catch(function () { finish(mapDraft.lat, mapDraft.lon, typed || ""); });
-        });
-        return;
-      }
-      api("/api/act", { op: "geo.resolve", lat: mapDraft.lat, lon: mapDraft.lon })
-        .then(function (res) { finish(res.lat, res.lon, res.address); })
-        .catch(function () { finish(mapDraft.lat, mapDraft.lon, mapDraft.address || ""); });
+      run({ op: "driver.complete", id: Number(el.dataset.id) });
     },
     "sheet-dname": function () { sheet("<h2>Имя</h2>" + field("dval", "Новое имя", S.user.driver_name, "") + '<button class="btn" data-act="save-d" data-field="name">Сохранить</button>'); },
     "sheet-dphone": function () { sheet("<h2>Телефон</h2>" + field("dval", "Телефон", S.user.driver_phone, "") + '<button class="btn" data-act="save-d" data-field="phone">Сохранить</button>'); },
@@ -1281,7 +839,7 @@
     "sheet-topup": function () { sheet("<h2>Пополнение</h2>" + field("amount", "Сумма", "500", "") + '<button class="btn" data-act="topup">Зачислить</button>'); },
     topup: function () { closeSheet(); run({ op: "driver.topup", amount: Number(val("amount")) }); },
     buy: function (el) { run({ op: "driver.buy", hours: Number(el.dataset.hours) }); },
-    help: function () { toast("Линия, список, текущий рейс, гео и профиль — как в боте"); },
+    help: function () { toast("Линия, список, текущий рейс и профиль — как в боте"); },
     nav: function (el) { window.Maximus.openLink("https://yandex.ru/maps/?text=" + encodeURIComponent(el.dataset.q || "")); },
     "a-open": function (el) { picked = el.dataset.id; go("a-driver"); },
     "a-order": function (el) { picked = el.dataset.id; go("a-order"); },
@@ -1365,7 +923,6 @@
     screen = entryScreen();
     render();
     setTimeout(hideSplash, 420);
-    probeGeolocation();
   }).catch(function (err) {
     // Не смогли получить состояние — пробуем войти по известному uid
     var fallbackId = (maxUser && maxUser.id) || savedUid();
@@ -1393,6 +950,54 @@
     setTimeout(hideSplash, 300);
   });
 
+  // ==================== KEEP-ALIVE ====================
+  // Приложение не должно «засыпать»: держим сессию активной и
+  // подтягиваем свежие данные, когда вкладка снова в фокусе.
+  var _keepAliveTimer = null;
+  var _lastPing = 0;
+
+  function keepAliveTick() {
+    if (!maxUser || !maxUser.id) return;
+    var now = Date.now();
+    // Пингуем не чаще раза в 20 секунд
+    if (now - _lastPing < 20000) return;
+    _lastPing = now;
+    api("/api/act", { op: "session.ping" }).catch(function () {});
+  }
+
+  function startKeepAlive() {
+    stopKeepAlive();
+    _keepAliveTimer = setInterval(keepAliveTick, 25000);
+    keepAliveTick();
+  }
+
+  function stopKeepAlive() {
+    if (_keepAliveTimer) {
+      clearInterval(_keepAliveTimer);
+      _keepAliveTimer = null;
+    }
+  }
+
+  // Возврат в приложение: сразу обновляем состояние
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      stopKeepAlive();
+      return;
+    }
+    startKeepAlive();
+    if (S && maxUser && maxUser.id) {
+      refresh().catch(function () {});
+    }
+  });
+
+  window.addEventListener("focus", function () {
+    startKeepAlive();
+    if (S && maxUser && maxUser.id) refresh().catch(function () {});
+  });
+
+  window.addEventListener("blur", stopKeepAlive);
+
+  // Обновление раз в 3 секунды на активных экранах — как было
   setInterval(function () {
     if (!S || inflight) return;
     if (["live", "d-current", "d-orders"].indexOf(screen) < 0) return;
