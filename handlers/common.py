@@ -24,11 +24,10 @@ MINI_APP_URL = _os.environ.get("MINI_APP_URL", "https://taximax-bot.onrender.com
 def register_common(router: Router) -> None:
     # --- Команда /minimax - открывает Mini App ---
     async def open_minimax(client, user_id, update, ctx):
-        # Мост «бот -> мини-апп»: приложение узнает пользователя по этому ID
+        # Персональный токен: гарантирует изоляцию данных между пользователями
         from core import storage as _st
-        _st.storage.touch_bot_user(user_id)
-        # Персональная ссылка с user_id для идентификации в Mini-App
-        personal_url = f"{MINI_APP_URL}/?uid={user_id}"
+        token = _st.storage.issue_user_token(user_id)
+        personal_url = f"{MINI_APP_URL}/?token={token}&uid={user_id}"
         from max_api.keyboards import link_button, inline_keyboard, keyboard_attachment
         kb = keyboard_attachment([[link_button("🚀 Открыть Mini-App", personal_url)]])
         text = (

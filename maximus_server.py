@@ -59,11 +59,16 @@ def run(coro):
 
 
 def uid_from(handler, body: dict | None = None) -> int:
-    """ID пользователя: cookie mx -> cookie maximus_uid -> ?uid= -> тело запроса."""
+    """ID пользователя: cookie mx -> cookie maximus_uid -> токен -> ?uid= -> тело.
+
+    Токен персональный: он выдаётся пользователю ботом и однозначно
+    определяет его. Никаких глобальных «последний пользователь».
+    """
     raw = handler.headers.get("Cookie") or ""
     jar = SimpleCookie()
     jar.load(raw)
 
+    # 1) Cookie с ID
     for cookie_name in ("mx", "maximus_uid"):
         morsel = jar.get(cookie_name)
         if morsel:
@@ -74,7 +79,28 @@ def uid_from(handler, body: dict | None = None) -> int:
             except ValueError:
                 pass
 
+    # 2) Персональный токен (cookie или заголовок или query)
+    token = ""
+    morsel = jar.get("maximus_token")
+    if morsel:
+        token = morsel.value
+    if not token:
+        token = handler.headers.get("X-Maximus-Token") or ""
     query = parse_qs(urlparse(handler.path).query)
+    if not token:
+        for value in query.get("token", []):
+            token = value
+            break
+    if token:
+        try:
+            from core.storage import storage as _storage
+            uid = _storage.resolve_token(token)
+            if uid:
+                return int(uid)
+        except Exception:
+            pass
+
+    # 3) uid в query / теле — только для локальной отладки
     for key in ("uid", "user_id"):
         for value in query.get(key, []):
             try:
@@ -545,8 +571,24 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def create_order(uid: int, draft: dict, price=None) -> dict:
-    if S.get_passenger_active_order(uid):
-        raise ValueError("У вас уже есть активный заказ")
+    active = S.get_passenger_active_order(uid)
+    if active:
+        # Зависшие заказы старше 6 часов закрываем автоматически
+        created = active.get("created_at") or ""
+        stale = False
+        try:
+            if created:
+                dt = datetime.fromisoformat(created)
+                stale = (datetime.now() - dt).total_seconds() > 6 * 3600
+        except Exception:
+            stale = False
+        if stale:
+            S.update_order(active["id"], status="cancelled",
+                           cancelled_by="timeout",
+                           cancelled_at=datetime.now().isoformat())
+            logger.info("Закрыт зависший заказ #%s (создан %s)", active.get("id"), created)
+        else:
+            raise ValueError("У вас уже есть активный заказ")
     user = S.get_user(uid) or {}
     oid = S.create_order({
         "passenger_id": uid,
@@ -698,6 +740,16 @@ def flag(value) -> bool:
 def act(uid: int, body: dict) -> dict:
     op = body.get("op") or ""
     if op == "login":
+        # Вход по персональному токену — изолирует пользователей
+        token = str(body.get("token") or "").strip()
+        if token:
+            uid_by_token = S.resolve_token(token)
+            if not uid_by_token:
+                raise ValueError("Ссылка устарела. Откройте приложение из бота заново.")
+            if uid_by_token not in S.users:
+                S.ensure_user(uid_by_token)
+            return {"ok": True, "user_id": uid_by_token}
+
         user_id = int(body.get("user_id") or 0)
         if user_id not in S.users and user_id > 0:
             name = (body.get("name") or "").strip()
@@ -735,22 +787,21 @@ def act(uid: int, body: dict) -> dict:
         return {"ok": True}
 
     if op == "client.diag":
-        # Диагностика окружения мини-приложения (для отладки гео)
-        if not uid:
-            raise PermissionError("Сначала выберите профиль")
+        # Диагностика окружения мини-приложения (для отладки)
         info = body.get("info") or {}
-        S.admin_data.setdefault("client_diag", {})[str(uid)] = {
+        S.admin_data.setdefault("client_diag", {})[str(uid or 0)] = {
             "at": datetime.now().isoformat(),
             "user_agent": str(info.get("userAgent") or "")[:300],
             "platform": str(info.get("platform") or "")[:40],
             "is_iframe": bool(info.get("isIframe")),
-            "has_geolocation": bool(info.get("hasGeolocation")),
-            "geo_error": str(info.get("geoError") or "")[:120],
-            "secure_context": bool(info.get("secureContext")),
+            "has_init_user": bool(info.get("hasInitUser")),
+            "init_user_id": info.get("initUserId"),
             "has_bridge": bool(info.get("hasBridge")),
+            "has_token": bool(info.get("hasToken")),
+            "has_cookie": bool(info.get("hasCookie")),
         }
         S.save()
-        logger.info("Диагностика клиента %s: %s", uid, S.admin_data["client_diag"][str(uid)])
+        logger.info("Диагностика клиента %s: %s", uid, S.admin_data["client_diag"][str(uid or 0)])
         return {"ok": True}
 
     if op == "session.ping":
@@ -1224,13 +1275,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"ok": True, "people": people})
                 return
             if path == "/api/whoami":
-                # Кого сервер видит: cookie -> последний писавший боту
+                # Кого сервер видит. Без глобального «последний пользователь» —
+                # только cookie или персональный токен.
                 uid = uid_from(self)
-                source = "cookie"
-                if not uid:
-                    uid = S.get_bot_user() or 0
-                    source = "bot" if uid else "none"
-                self.send_json(200, {"ok": True, "uid": uid, "source": source})
+                self.send_json(200, {"ok": True, "uid": uid,
+                                     "source": "cookie" if uid else "none"})
                 return
             if path == "/api/state":
                 uid = uid_from(self)

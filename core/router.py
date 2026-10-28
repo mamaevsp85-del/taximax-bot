@@ -62,12 +62,6 @@ class Router:
         if not user_id:
             logger.warning("Апдейт без actor_id пропущен: %s", update.update_type)
             return
-        # Мост «бот -> мини-апп»: запоминаем, кто последним писал боту.
-        # Мини-апп при открытии спросит /api/whoami и получит этот ID.
-        try:
-            storage.storage.touch_bot_user(int(user_id))
-        except Exception as exc:
-            logger.debug("Не удалось запомнить bot_user: %s", exc)
         try:
             if update.is_bot_started or update.is_bot_added:
                 await self._handle_start(user_id, update)

@@ -633,6 +633,33 @@
   }
   function closeSheet() { $("sheet-back").hidden = true; }
 
+  // ==================== ТОКЕН ПОЛЬЗОВАТЕЛЯ ====================
+  // Персональный токен изолирует данные: чужой токен не даёт доступа
+  // к заказам другого пользователя.
+  var TOKEN_KEY = "maximus_token";
+
+  function savedToken() {
+    try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+  }
+
+  function rememberToken(token) {
+    if (!token) return "";
+    try { localStorage.setItem(TOKEN_KEY, token); } catch (e) {}
+    try {
+      var secure = window.isSecureContext ? "; Secure" : "";
+      document.cookie = TOKEN_KEY + "=" + encodeURIComponent(token) +
+        "; path=/; max-age=31536000; SameSite=None" + secure;
+    } catch (e) {}
+    return token;
+  }
+
+  function savedTokenCookie() {
+    try {
+      var m = document.cookie.match(new RegExp("(?:^|; )" + TOKEN_KEY + "=([^;]*)"));
+      return m ? decodeURIComponent(m[1]) : "";
+    } catch (e) { return ""; }
+  }
+
   // ==================== ЗАПОМИНАНИЕ ПОЛЬЗОВАТЕЛЯ ====================
   var UID_KEY = "maximus_uid";
 
@@ -1080,9 +1107,35 @@
   setTimeout(hideSplash, 6000);
   var urlParams = new URLSearchParams(window.location.search);
   var urlUid = urlParams.get('uid') || urlParams.get('user_id') || '';
+  var urlToken = urlParams.get('token') || '';
+
+  // Токен из ссылки бота — самый надёжный способ идентификации
+  var activeToken = urlToken || savedToken() || savedTokenCookie();
+  if (urlToken) rememberToken(urlToken);
 
   // Порядок определения пользователя:
-  // 1) данные из MAX, 2) uid в URL, 3) сохранённый uid в localStorage
+  // 1) токен, 2) данные из MAX, 3) uid в URL, 4) сохранённый uid
+  if (activeToken) {
+    api("/api/act", { op: "login", token: activeToken }).then(function (data) {
+      if (data.state) {
+        S = normalizeState(data.state);
+        rememberUid(S.user.id);
+        rememberUidCookie(S.user.id);
+        setSplashRole(S.user.role);
+        screen = entryScreen();
+        render();
+        setTimeout(hideSplash, 420);
+        return;
+      }
+      showPeople();
+      setTimeout(hideSplash, 300);
+    }).catch(function () {
+      showPeople();
+      setTimeout(hideSplash, 300);
+    });
+    return;
+  }
+
   if (!maxUser && urlUid) {
     maxUser = { id: Number(urlUid), name: urlParams.get('name') || '', username: '', photo: '' };
   }

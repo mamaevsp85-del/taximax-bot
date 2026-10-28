@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import threading
 import tempfile
 import time
@@ -535,41 +536,59 @@ class Storage:
                 u["onboarded"] = True
                 self.save()
 
-    # ==================== МОСТ «БОТ -> МИНИ-АПП» ====================
-    def touch_bot_user(self, user_id: int, ttl_minutes: int = 60) -> None:
-        """Запоминает, кто последним писал боту.
+    # ==================== ПЕРСОНАЛЬНЫЕ ТОКЕНЫ МИНИ-АПП ====================
+    def issue_user_token(self, user_id: int) -> str:
+        """Персональный токен пользователя для входа в мини-апп.
 
-        Мини-апп открывается в iframe, где MAX часто не передаёт initData.
-        Тогда приложение спрашивает /api/whoami и получает этот ID.
+        Токен уникален для каждого пользователя — это гарантирует изоляцию:
+        чужой токен не даёт доступа к чужим заказам.
         """
         uid = int(user_id)
         if uid <= 0:
-            return
+            return ""
         with self._lock:
-            self.admin_data["last_bot_user"] = {
-                "user_id": uid,
-                "at": datetime.now().isoformat(),
-                "expires_at": (datetime.now() + timedelta(minutes=ttl_minutes)).isoformat(),
-            }
+            tokens = self.admin_data.setdefault("user_tokens", {})
+            # Переиспользуем существующий токен этого пользователя
+            for token, val in tokens.items():
+                try:
+                    if int(val) == uid:
+                        return token
+                except (TypeError, ValueError):
+                    continue
+            token = secrets.token_urlsafe(24)
+            tokens[token] = uid
             self.save()
+            return token
 
-    def get_bot_user(self) -> Optional[int]:
-        """ID последнего пользователя, писавшего боту (если не устарел)."""
-        rec = self.admin_data.get("last_bot_user") or {}
-        if not rec:
+    def resolve_token(self, token: str) -> Optional[int]:
+        """Пользователь по персональному токену (или None)."""
+        if not token:
             return None
-        exp = rec.get("expires_at")
-        if exp:
-            try:
-                if datetime.now() > datetime.fromisoformat(exp):
-                    return None
-            except Exception:
-                pass
+        tokens = self.admin_data.get("user_tokens") or {}
+        val = tokens.get(str(token))
+        if val is None:
+            return None
         try:
-            uid = int(rec.get("user_id") or 0)
+            uid = int(val)
         except (TypeError, ValueError):
             return None
         return uid if uid > 0 else None
+
+    def revoke_user_token(self, user_id: int) -> None:
+        """Отзывает токен пользователя (при выходе)."""
+        uid = int(user_id)
+        with self._lock:
+            tokens = self.admin_data.get("user_tokens") or {}
+            changed = False
+            for token in list(tokens.keys()):
+                try:
+                    if int(tokens[token]) == uid:
+                        tokens.pop(token, None)
+                        changed = True
+                except (TypeError, ValueError):
+                    continue
+            if changed:
+                self.save()
 
     # ==================== РЕЛЕЙ-СЕССИИ (персистентные) ====================
     def set_relay_session(self, user_id: int, partner_id: int, order_id: int,
