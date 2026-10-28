@@ -615,6 +615,116 @@
   }
   function closeSheet() { $("sheet-back").hidden = true; }
 
+  // ==================== ЗАПОМИНАНИЕ ПОЛЬЗОВАТЕЛЯ ====================
+  var UID_KEY = "maximus_uid";
+
+  function savedUid() {
+    try {
+      var v = localStorage.getItem(UID_KEY);
+      return v ? Number(v) : 0;
+    } catch (e) { return 0; }
+  }
+
+  function rememberUid(id) {
+    var n = Number(id) || 0;
+    if (n > 0) {
+      try { localStorage.setItem(UID_KEY, String(n)); } catch (e) {}
+    }
+    return n;
+  }
+
+  function savedUidCookie() {
+    try {
+      var m = document.cookie.match(new RegExp("(?:^|; )" + UID_KEY + "=([^;]*)"));
+      return m ? Number(m[1]) : 0;
+    } catch (e) { return 0; }
+  }
+
+  function rememberUidCookie(id) {
+    var n = Number(id) || 0;
+    if (n > 0) {
+      try {
+        document.cookie = UID_KEY + "=" + n + "; path=/; max-age=31536000; SameSite=Lax";
+      } catch (e) {}
+    }
+    return n;
+  }
+
+  // ==================== АВТОДОПОЛНЕНИЕ АДРЕСА ====================
+  var _suggestTimer = null;
+  var _suggestSeq = 0;
+
+  function attachSuggest(inputId, onPick, opts) {
+    var input = document.getElementById(inputId);
+    if (!input) return;
+    var options = opts || {};
+
+    var box = document.createElement("div");
+    box.className = "suggest-box";
+    box.hidden = true;
+    input.parentNode.appendChild(box);
+
+    function hide() { box.hidden = true; box.innerHTML = ""; }
+
+    function show(items) {
+      if (!items || !items.length) { hide(); return; }
+      var html = "";
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        var icon = it.kind === "house" ? "\uD83C\uDFE0"
+                 : it.kind === "street" ? "\uD83D\uDEE3"
+                 : "\uD83D\uDCCD";
+        html += '<button type="button" class="suggest-item" data-i="' + i + '">' +
+          "<i>" + icon + "</i><span><b>" + esc(it.title) + "</b>" +
+          "<small>" + esc(it.subtitle || it.address) + "</small></span></button>";
+      }
+      box.innerHTML = html;
+      box.hidden = false;
+
+      var btns = box.querySelectorAll(".suggest-item");
+      for (var k = 0; k < btns.length; k++) {
+        (function (btn) {
+          btn.addEventListener("click", function (e) {
+            e.preventDefault();
+            var it = items[Number(btn.dataset.i)];
+            input.value = it.title + (it.subtitle ? ", " + it.subtitle.split(",")[0] : "");
+            hide();
+            if (onPick) onPick(it);
+          });
+        })(btns[k]);
+      }
+    }
+
+    function fetchSuggest(query) {
+      var seq = ++_suggestSeq;
+      api("/api/act", {
+        op: "geo.suggest",
+        query: query,
+        city: options.city || (S && S.user && S.user.home_city) || "",
+        lat: null,
+        lon: null
+      }).then(function (res) {
+        if (seq !== _suggestSeq) return;
+        show(res.items || []);
+      }).catch(function () { hide(); });
+    }
+
+    input.addEventListener("input", function () {
+      var q = input.value.trim();
+      clearTimeout(_suggestTimer);
+      if (q.length < 2) { hide(); return; }
+      _suggestTimer = setTimeout(function () { fetchSuggest(q); }, 320);
+    });
+
+    input.addEventListener("blur", function () {
+      setTimeout(hide, 180);
+    });
+
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") hide();
+    });
+  }
+
   function render() {
     if (S && S.user && S.user.role) {
       document.body.dataset.role = S.user.role;
