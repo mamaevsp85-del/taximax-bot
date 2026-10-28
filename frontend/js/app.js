@@ -298,7 +298,7 @@
       var driver = o.driver_name ? '<div class="card"><b>' + esc(o.driver_name) + '</b><p class="muted">' +
         esc([o.car_model, o.car_number, o.car_color].filter(Boolean).join(" · ")) + "<br>" + esc(o.driver_phone) + "</p>" +
         '<div class="btn-row"><button class="btn ghost" data-act="sheet-chat" data-id="' + o.id + '">Написать</button>' +
-        '<button class="btn ghost" data-act="call" data-phone="' + esc(o.driver_phone) + '">Позвонить</button></div></div>' : "";
+        '<button class="btn ghost" data-act="max-call" data-peer="' + esc(o.driver_id || "") + '" data-phone="' + esc(o.driver_phone) + '">📞 Позвонить</button></div></div>' : "";
       return '<div class="row"><h2 style="margin:0">Заказ #' + o.id + "</h2>" + badge(o.status) + "</div>" +
         '<div class="card"><div class="route">' + esc(o.pickup) + "<small>" + esc(o.destination) + "</small></div>" +
         '<div class="row" style="margin-top:10px"><span class="muted">' + Number(o.distance).toFixed(1) + " км</span><b>" + money(o.price) + "</b></div></div>" +
@@ -307,7 +307,7 @@
           '<button class="btn ghost" data-act="sheet-complaint" data-id="' + o.id + '">Жалоба на авто</button>' +
           '<button class="btn danger" data-act="cancel" data-id="' + o.id + '">Отменить заказ</button>' : "") +
         (o.status === "completed" && !o.rating ? '<button class="btn yellow" data-act="to-rate" data-id="' + o.id + '">Оценить поездку</button>' : "") +
-        (o.status === "completed" ? '<button class="btn ghost" data-act="fav-add" data-id="' + o.id + '">В избранное</button>' : "") +
+        (o.status === "completed" ? '<button class="btn ghost" data-act="fav-add" data-id="' + o.id + '">⭐ В избранное</button>' : "") +
         (o.complaint ? '<p class="note">Жалоба: ' + esc(o.complaint) + "</p>" : "");
     },
     orders: function () {
@@ -389,6 +389,20 @@
       }).join("");
       return "<h2>Оценка поездки #" + picked + '</h2><div class="stars">' + stars + '</div><button class="btn" data-act="save-rate">Сохранить</button>';
     },
+    "fav-offer": function () {
+      var oid = window._favOrder;
+      var pool = (S.passenger && S.passenger.orders) || [];
+      var o = pool.filter(function (x) { return x && x.id === oid; })[0] || {};
+      return '<div class="onb-hero">' +
+        '<div class="onb-logo">⭐</div>' +
+        '<h1>Сохранить маршрут?</h1>' +
+        '<p class="muted">В следующий раз закажете в один клик — без ввода адресов.</p>' +
+        '</div>' +
+        '<div class="card"><div class="route">' + esc(o.pickup || "—") +
+        "<small>" + esc(o.destination || "—") + "</small></div></div>" +
+        '<button class="btn" data-act="fav-save">⭐ Сохранить в избранное</button>' +
+        '<button class="btn ghost" data-act="fav-skip">Не сейчас</button>';
+    },
     driver: function () {
       var u = S.user;
       var line = u.line === "online" ? "На линии" : u.line === "break" ? "Перерыв" : "Оффлайн";
@@ -422,8 +436,12 @@
       return '<div class="row"><h2 style="margin:0">Рейс #' + o.id + "</h2>" + badge(o.status) + "</div>" +
         '<div class="card"><div class="route">' + esc(o.pickup) + "<small>" + esc(o.destination) + "</small></div>" +
         '<p class="muted">Пассажир ' + esc(o.passenger_name) + " · " + esc(o.passenger_phone) + "</p><b>" + money(o.price) + "</b></div>" +
-        actions + '<div class="btn-row"><button class="btn ghost" data-act="nav" data-q="' + esc(o.status === "in_progress" ? o.destination : o.pickup) +
-        '">Навигация</button><button class="btn ghost" data-act="sheet-chat" data-id="' + o.id + '">Пассажир</button></div>' +
+        actions +
+        '<div class="btn-row">' +
+          '<button class="btn ghost" data-act="nav" data-q="' + esc(o.status === "in_progress" ? o.destination : o.pickup) + '">Навигация</button>' +
+          '<button class="btn ghost" data-act="sheet-chat" data-id="' + o.id + '">Написать</button>' +
+        '</div>' +
+        '<button class="btn ghost" data-act="max-call" data-peer="' + esc(o.passenger_id || "") + '" data-phone="' + esc(o.passenger_phone || "") + '">📞 Позвонить через MAX</button>' +
         (["accepted", "driver_arrived", "in_progress", "pending"].indexOf(o.status) >= 0 ? '<button class="btn danger" data-act="d-cancel" data-id="' + o.id + '">Отменить заказ</button>' : "");
     },
     "d-profile": function () {
@@ -867,7 +885,30 @@
     "use-fav": function (el) { run({ op: "favorite.use", index: Number(el.dataset.index) }); },
     "to-rate": function (el) { picked = Number(el.dataset.id); window._star = 0; go("rate"); },
     star: function (el) { window._star = Number(el.dataset.n); render(); },
-    "save-rate": function () { run({ op: "order.rate", id: picked, stars: window._star || 0 }).then(function () { screen = "home"; }); },
+    "save-rate": function () {
+      var oid = picked;
+      run({ op: "order.rate", id: oid, stars: window._star || 0 }).then(function (ok) {
+        if (!ok) { screen = "home"; render(); return; }
+        // Предлагаем сохранить маршрут в избранное
+        window._favOrder = oid;
+        go("fav-offer");
+      });
+    },
+    "fav-save": function () {
+      var oid = window._favOrder;
+      if (!oid) { screen = "home"; render(); return; }
+      run({ op: "favorite.add", id: oid }).then(function (ok) {
+        if (ok) toast("Маршрут сохранён в избранное");
+        window._favOrder = null;
+        screen = "home";
+        render();
+      });
+    },
+    "fav-skip": function () {
+      window._favOrder = null;
+      screen = "home";
+      render();
+    },
     "sheet-chat": function (el) {
       picked = Number(el.dataset.id);
       var pool = [].concat((S.passenger && S.passenger.orders) || [], (S.driver && S.driver.current) ? [S.driver.current] : [], (S.admin && S.admin.orders) || []);
@@ -879,7 +920,44 @@
         field("msg", "Текст", "", "") + '<button class="btn" data-act="send-msg" data-id="' + picked + '">Отправить</button>');
     },
     "send-msg": function (el) { closeSheet(); run({ op: "order.chat", id: Number(el.dataset.id), text: val("msg") }); },
-    call: function (el) { toast(el.dataset.phone ? "Номер " + el.dataset.phone : "Номера нет"); },
+    "max-chat": function (el) {
+      // Связь через чат MAX: открываем диалог с собеседником
+      var id = Number(el.dataset.id);
+      var pool = [].concat(
+        (S.passenger && S.passenger.orders) || [],
+        (S.driver && S.driver.current) ? [S.driver.current] : [],
+        (S.admin && S.admin.orders) || []
+      );
+      var o = pool.filter(function (x) { return x && x.id === id; })[0] || {};
+      var peer = (S.user.role === "driver") ? o.passenger_id : o.driver_id;
+      if (!peer) { toast("Собеседник не найден"); return; }
+      var link = "https://max.ru/id" + peer;
+      window.Maximus.openBotChat ? window.Maximus.openBotChat(link) : window.Maximus.openLink(link);
+    },
+    "max-call": function (el) {
+      // Звонок через MAX: открываем профиль собеседника в мессенджере,
+      // оттуда доступен встроенный звонок MAX
+      var peer = el.dataset.peer || "";
+      var phone = el.dataset.phone || "";
+      if (peer) {
+        var link = "https://max.ru/id" + peer;
+        if (window.Maximus.openBotChat) window.Maximus.openBotChat(link);
+        else window.Maximus.openLink(link);
+        return;
+      }
+      if (phone) {
+        var clean = String(phone).replace(/[^\d+]/g, "");
+        window.Maximus.openLink("tel:" + clean);
+        return;
+      }
+      toast("Нет данных для звонка");
+    },
+    call: function (el) {
+      var phone = el.dataset.phone || "";
+      if (!phone) { toast("Номер не указан"); return; }
+      var clean = String(phone).replace(/[^\d+]/g, "");
+      window.Maximus.openLink("tel:" + clean);
+    },
     "onb-next": function () {
       var step = window._onbStep || 1;
       if (step === 1) {
@@ -1143,17 +1221,82 @@
   window.addEventListener("blur", stopKeepAlive);
 
   // Обновление раз в 3 секунды на активных экранах — как было
+  // ==================== УВЕДОМЛЕНИЯ ====================
+  var _lastStatus = {};       // order_id -> последний известный статус
+  var _notifySeen = {};       // чтобы не дублировать
+
+  var STATUS_TEXT = {
+    accepted: "Водитель принял заказ и едет к вам",
+    driver_arrived: "Водитель прибыл на место",
+    in_progress: "Поездка началась",
+    completed: "Поездка завершена",
+    cancelled: "Заказ отменён"
+  };
+
+  function showBanner(text, kind) {
+    var el = document.getElementById("notify-banner");
+    if (!el) return;
+    el.className = "notify-banner " + (kind || "");
+    el.innerHTML = '<i>🔔</i><span>' + esc(text) + '</span>' +
+      '<button type="button" onclick="this.parentNode.classList.remove(\'show\')">✕</button>';
+    el.classList.add("show");
+    if (window.Maximus && window.Maximus.haptic) window.Maximus.haptic("ok");
+    clearTimeout(showBanner._t);
+    showBanner._t = setTimeout(function () {
+      el.classList.remove("show");
+    }, 6000);
+  }
+
+  function checkStatusChanges(data) {
+    var norm = normalizeState(data);
+    var orders = [];
+
+    // Заказы пассажира
+    if (norm.passenger && norm.passenger.orders) {
+      orders = orders.concat(norm.passenger.orders);
+    }
+    // Текущий заказ водителя
+    if (norm.driver && norm.driver.current) {
+      orders.push(norm.driver.current);
+    }
+
+    for (var i = 0; i < orders.length; i++) {
+      var o = orders[i];
+      if (!o || !o.id) continue;
+      var key = "o" + o.id;
+      var prev = _lastStatus[key];
+      var cur = o.status;
+      _lastStatus[key] = cur;
+
+      if (!prev || prev === cur) continue;
+      // Показываем уведомление только о значимых переходах
+      var msg = STATUS_TEXT[cur];
+      if (!msg) continue;
+      var dedup = key + "_" + cur;
+      if (_notifySeen[dedup]) continue;
+      _notifySeen[dedup] = true;
+
+      var text = msg + " · заказ #" + o.id;
+      if (cur === "completed" && o.price) {
+        text = "Поездка #" + o.id + " завершена · " + money(o.price);
+      }
+      showBanner(text, cur === "completed" ? "ok" : cur === "cancelled" ? "err" : "");
+    }
+  }
+
+  // Опрос состояния — работает на ВСЕХ экранах, чтобы ловить уведомления
   setInterval(function () {
     if (!S || inflight) return;
-    if (["live", "d-current", "d-orders"].indexOf(screen) < 0) return;
     var stateUrl = "/api/state";
     if (maxUser && maxUser.id) stateUrl += "?uid=" + maxUser.id;
     api(stateUrl).then(function (data) {
       if (inflight) return;
+      if (!data || data.ok === false) return;
+      checkStatusChanges(data);
       S = normalizeState(data);
       render();
     }).catch(function () {});
-  }, 3000);
+  }, 5000);
 
   function showPeople() {
     api("/api/people").then(function (data) {

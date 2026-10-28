@@ -1084,6 +1084,61 @@ select:focus {
 
 
 /* =========================================================
+   БАННЕР УВЕДОМЛЕНИЙ
+   ========================================================= */
+
+.notify-banner {
+  position: fixed;
+  left: 50%;
+  top: 12px;
+  transform: translate(-50%, -140%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(420px, calc(100% - 24px));
+  padding: 13px 16px;
+  border-radius: 16px;
+  background: #101828;
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 13.5px;
+  line-height: 1.35;
+  box-shadow: var(--shadow-lg);
+  transition: transform 0.35s var(--ease), opacity 0.35s var(--ease);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.notify-banner.show {
+  transform: translate(-50%, 0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.notify-banner.ok { background: #067647; }
+.notify-banner.err { background: #b42318; }
+
+.notify-banner i {
+  font-style: normal;
+  font-size: 17px;
+  flex: none;
+}
+
+.notify-banner span { flex: 1; }
+
+.notify-banner button {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+/* =========================================================
    ТОСТ
    ========================================================= */
 

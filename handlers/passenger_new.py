@@ -1006,6 +1006,8 @@ def register_passenger(router: Router) -> None:
                       [callback_button("↪️ Меню", "passenger:menu")]])
 
     router.on_callback("passenger:favorite_add:")(favorite_add)
+    # Алиас для кнопки из уведомления о завершении поездки
+    router.on_callback("passenger:fav_add:")(favorite_add)
 
     # --- создать заказ из избранного ---
     async def favorite_use(client, user_id, update, ctx):

@@ -410,6 +410,41 @@ def _bot_link() -> str:
     return ""
 
 
+def _notify_passenger(order: dict, text: str, keyboard: list | None = None) -> None:
+    """Отправляет уведомление пассажиру в чат MAX (в фоне)."""
+    import threading
+
+    pid = order.get("passenger_id")
+    if not pid:
+        return
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return
+    if pid_int <= 0:
+        return
+
+    def worker():
+        try:
+            asyncio.run(_notify_async(pid_int, text, keyboard))
+        except Exception as exc:
+            logger.warning("Не удалось уведомить пассажира %s: %s", pid_int, exc)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+async def _notify_async(user_id: int, text: str, keyboard: list | None = None) -> None:
+    from max_api.client import MaxClient
+    from max_api.keyboards import keyboard_attachment
+
+    client = MaxClient()
+    try:
+        attachments = keyboard_attachment(keyboard) if keyboard else None
+        await client.send_message(user_id=user_id, text=text, attachments=attachments)
+    finally:
+        await client.close()
+
+
 def _send_geo_prompt(user_id: int, kind: str = "pickup") -> None:
     """Бот присылает в чат кнопку «Отправить геолокацию» (нативная MAX)."""
     import threading
@@ -634,7 +669,26 @@ def complete(uid: int, oid: int, lat: float | None = None, lon: float | None = N
         last_location_at=datetime.now().isoformat(),
     )
     remove_order_from_driver_queue(uid, oid)
-    return brief_order(S.get_order(oid))
+
+    # Уведомляем пассажира и предлагаем сохранить маршрут в избранное
+    final_order = S.get_order(oid) or {}
+    _notify_passenger(
+        final_order,
+        f"✅ <b>Поездка #{oid} завершена</b>\n\n"
+        f"📍 {final_order.get('pickup') or '—'}\n"
+        f"🎯 {final_order.get('destination') or '—'}\n"
+        f"📏 {new_distance:.1f} км · {new_duration} мин\n"
+        f"💰 <b>Итого: {total:.0f} ₽</b>\n\n"
+        "Сохранить этот маршрут в избранное, чтобы заказывать в один клик?",
+        keyboard=[
+            [{"type": "callback", "text": "⭐ В избранное",
+              "payload": f"passenger:fav_add:{oid}"}],
+            [{"type": "callback", "text": "🚖 Статус заказа",
+              "payload": f"passenger:order:{oid}"}],
+        ],
+    )
+
+    return brief_order(final_order)
 
 
 def flag(value) -> bool:
@@ -838,6 +892,36 @@ def act(uid: int, body: dict) -> dict:
         chat = list(order.get("chat") or [])
         chat.append({"from": uid, "text": text, "at": datetime.now().isoformat()})
         S.update_order(order["id"], chat=chat[-40:])
+
+        # Уведомляем собеседника в MAX
+        pid = order.get("passenger_id")
+        did = order.get("driver_id")
+        peer = did if uid == pid else pid
+        if peer:
+            sender_role = "Водитель" if uid == did else "Пассажир"
+            try:
+                peer_int = int(peer)
+                import threading
+
+                def worker():
+                    try:
+                        asyncio.run(_notify_async(
+                            peer_int,
+                            f"💬 <b>{sender_role}</b> · заказ #{order['id']}\n\n"
+                            f"{text[:300]}",
+                            keyboard=[[{
+                                "type": "callback",
+                                "text": "Открыть заказ",
+                                "payload": f"passenger:order:{order['id']}",
+                            }]],
+                        ))
+                    except Exception as exc:
+                        logger.warning("Уведомление о сообщении %s: %s", peer_int, exc)
+
+                threading.Thread(target=worker, daemon=True).start()
+            except (TypeError, ValueError):
+                pass
+
         return {"ok": True}
     if op == "favorite.add":
         order = own_order(uid, int(body["id"]))
@@ -929,13 +1013,37 @@ def act(uid: int, body: dict) -> dict:
         S.add_transaction(uid, "access", -price, hours=hours, description=f"Смена {hours} ч")
         return {"ok": True}
     if op == "driver.accept":
-        return {"ok": True, "order": accept(uid, int(body["id"]))}
+        result = accept(uid, int(body["id"]))
+        order = S.get_order(int(body["id"])) or {}
+        _notify_passenger(
+            order,
+            f"🚗 <b>Ваш заказ #{order.get('id')} принят!</b>\n\n"
+            f"👤 Водитель: {result.get('driver_name') or '—'}\n"
+            + (f"🚘 {result.get('car_model') or ''} {result.get('car_number') or ''}\n"
+               if result.get('car_number') else "")
+            + (f"🎨 {result.get('car_color')}\n" if result.get('car_color') else "")
+            + f"\n📍 Подача: {order.get('pickup') or '—'}\n"
+            f"💰 Стоимость: {order.get('price') or 0} ₽\n\n"
+            "Водитель уже едет к вам.",
+            keyboard=[[{"type": "callback", "text": f"🚖 Статус заказа",
+                        "payload": f"passenger:order:{order.get('id')}"}]],
+        )
+        return {"ok": True, "order": result}
+
     if op == "driver.arrived":
         order = own_order(uid, int(body["id"]), as_driver=True)
         if order.get("status") != "accepted":
             raise ValueError("Сначала заказ должен быть принят")
         S.update_order(order["id"], status="driver_arrived", driver_arrived_at=datetime.now().isoformat())
+        _notify_passenger(
+            S.get_order(order["id"]) or order,
+            f"📍 <b>Водитель прибыл</b> по заказу #{order['id']}\n\n"
+            f"Машина: {(S.get_user(uid) or {}).get('car_model') or ''} "
+            f"{(S.get_user(uid) or {}).get('car_number') or ''}\n\n"
+            "Первые 3 минуты ожидания бесплатно.",
+        )
         return {"ok": True}
+
     if op == "driver.wait":
         order = own_order(uid, int(body["id"]), as_driver=True)
         if order.get("waiting_started_at") and not order.get("waiting_ended_at"):
@@ -943,12 +1051,21 @@ def act(uid: int, body: dict) -> dict:
         else:
             S.update_order(order["id"], waiting_started_at=datetime.now().isoformat(), waiting_ended_at=None)
         return {"ok": True}
+
     if op == "driver.start":
         order = own_order(uid, int(body["id"]), as_driver=True)
         if order.get("status") not in ("accepted", "driver_arrived"):
             raise ValueError("Поездку сейчас нельзя начать")
         stop_waiting(order["id"])
         S.update_order(order["id"], status="in_progress", started_at=datetime.now().isoformat())
+        _notify_passenger(
+            S.get_order(order["id"]) or order,
+            f"🚗 <b>Поездка #{order['id']} началась</b>\n\n"
+            f"🎯 Едем: {order.get('destination') or '—'}\n"
+            f"📏 {order.get('distance') or 0} км · ~{order.get('time_minutes') or 0} мин\n"
+            f"💰 {order.get('price') or 0} ₽\n\n"
+            "Хорошей поездки!",
+        )
         return {"ok": True}
     if op == "driver.complete":
         # Координаты необязательны: без гео завершаем по сохранённому адресу
