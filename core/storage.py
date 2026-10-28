@@ -49,6 +49,9 @@ class Storage:
         self.admin_data: Dict[str, Any] = self._default_admin_data()
         self.relay_sessions: Dict[int, Dict[str, Any]] = {}
         self.driver_sessions: Dict[int, Dict[str, Any]] = {}
+        self._mtime: float = 0
+        self._syncing: bool = False
+        self._last_sync: float = 0.0
         self._lock = threading.RLock()
         self._load()
 
@@ -85,6 +88,22 @@ class Storage:
             },
         }
 
+    def _sync(self) -> None:
+        """Подхватывает изменения файла, сделанные другим процессом.
+
+        Бот (main.py) и мини-апп (maximus_server.py) — разные процессы.
+        Без этого каждый держал свою копию базы в памяти и затирал
+        изменения другого при сохранении.
+        """
+        if getattr(self, "_syncing", False):
+            return
+        try:
+            mtime = os.path.getmtime(self.file_path)
+        except OSError:
+            return
+        if mtime != getattr(self, "_mtime", 0):
+            self._load()
+
     def _load(self) -> None:
         with self._lock:
             if not os.path.exists(self.file_path):
@@ -102,10 +121,15 @@ class Storage:
                 self.admin_data[k] = v
             self.relay_sessions = {int(k): v for k, v in raw.get("relay_sessions", {}).items()}
             self.driver_sessions = {int(k): v for k, v in raw.get("driver_sessions", {}).items()}
+            try:
+                self._mtime = os.path.getmtime(self.file_path)
+            except OSError:
+                self._mtime = 0
 
     def save(self) -> None:
         with self._lock:
             tmp = None
+            self._syncing = True
             try:
                 directory = os.path.dirname(os.path.abspath(self.file_path))
                 os.makedirs(directory, exist_ok=True)
@@ -132,6 +156,11 @@ class Storage:
             finally:
                 if tmp and os.path.exists(tmp):
                     os.unlink(tmp)
+                self._syncing = False
+                try:
+                    self._mtime = os.path.getmtime(self.file_path)
+                except OSError:
+                    self._mtime = 0
 
     def flush(self) -> None:
         self.save()
@@ -146,6 +175,7 @@ class Storage:
             Статистика до очистки: сколько пользователей/заказов было удалено.
         """
         with self._lock:
+            self._sync()
             removed = {
                 "users": len(self.users),
                 "orders": len(self.orders),
@@ -160,6 +190,7 @@ class Storage:
     # ==================== ПОЛЬЗОВАТЕЛИ ====================
     def ensure_user(self, user_id: int, name: str = "", username: str = "") -> Dict[str, Any]:
         with self._lock:
+            self._sync()
             user = self.users.get(user_id)
             if user is None:
                 user = {
@@ -189,11 +220,21 @@ class Storage:
                     self.save()
             return self.users[user_id]
 
+    def _sync_throttled(self, interval: float = 1.0) -> None:
+        """Перезагрузка с диска не чаще раза в `interval` секунд (для чтения)."""
+        now = time.time()
+        if now - getattr(self, "_last_sync", 0.0) < interval:
+            return
+        self._last_sync = now
+        self._sync()
+
     def get_user(self, user_id: int) -> Dict[str, Any]:
+        self._sync_throttled()
         return self.users.get(int(user_id)) or {}
 
     def update_user(self, user_id: int, **fields) -> None:
         with self._lock:
+            self._sync()
             user = self.users.setdefault(int(user_id), {"user_id": int(user_id),
                                      "type": ROLE_PASSENGER, "active_role": ROLE_PASSENGER})
             user.update(fields)
@@ -430,6 +471,7 @@ class Storage:
     # ==================== ЗАКАЗЫ ====================
     def create_order(self, data: dict) -> int:
         with self._lock:
+            self._sync()
             self.order_counter += 1
             oid = self.order_counter
             p = self.users.get(int(data.get("passenger_id", 0)), {})
@@ -467,6 +509,7 @@ class Storage:
             return oid
 
     def get_order(self, order_id: int) -> dict:
+        self._sync_throttled()
         return self.orders.get(int(order_id), {})
 
     # ==================== ГЕО-ЗАПРОСЫ ИЗ МИНИ-ПРИЛОЖЕНИЯ ====================
@@ -482,6 +525,7 @@ class Storage:
             "lat": None, "lon": None, "address": "", "city": "",
         }
         with self._lock:
+            self._sync()
             self.admin_data.setdefault("geo_requests", {})[str(uid)] = req
             self.save()
         return req
@@ -510,6 +554,7 @@ class Storage:
         """Бот получил гео из чата — сохраняем для мини-приложения."""
         uid = str(int(user_id))
         with self._lock:
+            self._sync()
             req = (self.admin_data.get("geo_requests") or {}).get(uid)
             if not req:
                 return
@@ -523,6 +568,7 @@ class Storage:
     def clear_geo_request(self, user_id: int) -> None:
         uid = str(int(user_id))
         with self._lock:
+            self._sync()
             reqs = self.admin_data.get("geo_requests") or {}
             if uid in reqs:
                 reqs.pop(uid, None)
@@ -531,6 +577,7 @@ class Storage:
     def mark_onboarded(self, user_id: int) -> None:
         """Пользователь прошёл знакомство — больше не спрашиваем."""
         with self._lock:
+            self._sync()
             u = self.users.get(int(user_id))
             if u is not None:
                 u["onboarded"] = True
@@ -547,6 +594,7 @@ class Storage:
         if uid <= 0:
             return ""
         with self._lock:
+            self._sync()
             tokens = self.admin_data.setdefault("user_tokens", {})
             # Переиспользуем существующий токен этого пользователя
             for token, val in tokens.items():
@@ -564,6 +612,7 @@ class Storage:
         """Пользователь по персональному токену (или None)."""
         if not token:
             return None
+        self._sync_throttled()
         tokens = self.admin_data.get("user_tokens") or {}
         val = tokens.get(str(token))
         if val is None:
@@ -578,6 +627,7 @@ class Storage:
         """Отзывает токен пользователя (при выходе)."""
         uid = int(user_id)
         with self._lock:
+            self._sync()
             tokens = self.admin_data.get("user_tokens") or {}
             changed = False
             for token in list(tokens.keys()):
@@ -599,6 +649,7 @@ class Storage:
             "order_id": int(order_id), "until": until,
         }
         with self._lock:
+            self._sync()
             self.relay_sessions[int(user_id)] = {
                 **sess, "partner_id": int(partner_id),
             }
@@ -625,12 +676,14 @@ class Storage:
 
     def stop_relay_session(self, user_id: int) -> None:
         with self._lock:
+            self._sync()
             self.relay_sessions.pop(int(user_id), None)
             self.save()
 
     # ==================== ИЗБРАННОЕ (пассажиры) ====================
     def add_favorite(self, user_id: int, order_id: int, label: str = "") -> None:
         with self._lock:
+            self._sync()
             u = self.users.setdefault(int(user_id), {"user_id": int(user_id)})
             favs = u.setdefault("favorites", [])
             entry = {"order_id": int(order_id), "label": label or "",
@@ -641,6 +694,7 @@ class Storage:
 
     def remove_favorite(self, user_id: int, order_id: int) -> bool:
         with self._lock:
+            self._sync()
             u = self.users.get(int(user_id))
             if not u:
                 return False
@@ -660,6 +714,7 @@ class Storage:
     def set_order_rating(self, order_id: int, rating: int,
                          passenger_id: Optional[int] = None) -> bool:
         with self._lock:
+            self._sync()
             o = self.orders.get(int(order_id))
             if not o:
                 return False
@@ -689,6 +744,7 @@ class Storage:
         cancelled: List[int] = []
         now = datetime.now()
         with self._lock:
+            self._sync()
             for oid, o in list(self.orders.items()):
                 if o.get("status") != "pending":
                     continue
@@ -710,6 +766,7 @@ class Storage:
 
     def update_order(self, order_id: int, **fields) -> None:
         with self._lock:
+            self._sync()
             o = self.orders.get(int(order_id))
             if o:
                 o.update(fields)
@@ -741,6 +798,7 @@ class Storage:
 
     def add_notified_driver(self, order_id: int, driver_id: int) -> None:
         with self._lock:
+            self._sync()
             o = self.orders.get(int(order_id))
             if o and driver_id not in o.setdefault("notified_driver_ids", []):
                 o["notified_driver_ids"].append(driver_id)
@@ -748,6 +806,7 @@ class Storage:
 
     def mark_driver_declined(self, order_id: int, driver_id: int) -> None:
         with self._lock:
+            self._sync()
             o = self.orders.get(int(order_id))
             if o and driver_id not in o.setdefault("declined_driver_ids", []):
                 o["declined_driver_ids"].append(driver_id)
@@ -851,6 +910,7 @@ class Storage:
         меню «плат» не отображается у водителей.
         """
         with self._lock:
+            self._sync()
             cfg = self.get_commission_config()
             if "percent" in fields:
                 try:
@@ -900,6 +960,7 @@ class Storage:
     def set_access_price(self, hours: int, price: float) -> None:
         """Задать цену за доступ на N часов."""
         with self._lock:
+            self._sync()
             cfg = self.get_commission_config()
             cfg.setdefault("access_prices", {})[str(int(hours))] = _to_float(price, 0.0)
             self.save()
@@ -907,6 +968,7 @@ class Storage:
     def remove_access_price(self, hours: int) -> None:
         """Убрать тариф доступа на N часов."""
         with self._lock:
+            self._sync()
             cfg = self.get_commission_config()
             ap = cfg.setdefault("access_prices", {})
             ap.pop(str(int(hours)), None)
@@ -920,6 +982,7 @@ class Storage:
     def set_balances_disabled(self, enabled: bool) -> None:
         """Включить/выключить режим скрытия балансов у водителей."""
         with self._lock:
+            self._sync()
             if enabled:
                 self.admin_data["balances_disabled"] = True
             else:
@@ -936,6 +999,7 @@ class Storage:
             Сумма комиссии (0.0 — если комиссия не применяется).
         """
         with self._lock:
+            self._sync()
             cfg = self.get_commission_config()
             if not cfg.get("enabled") or cfg.get("mode") != "percent":
                 return 0.0
@@ -965,6 +1029,7 @@ class Storage:
     # ==================== СТАТИСТИКА ====================
     def bump_driver_stat(self, driver_id: int, field: str, delta: int = 1) -> None:
         with self._lock:
+            self._sync()
             u = self.users.get(int(driver_id))
             if u is None:
                 return
@@ -1005,6 +1070,7 @@ class Storage:
     def deduct_balance(self, user_id: int, amount: float) -> bool:
         """Списать средства. False — если недостаточно."""
         with self._lock:
+            self._sync()
             current = self.get_balance(user_id)
             if current < float(amount):
                 return False
@@ -1013,6 +1079,7 @@ class Storage:
 
     def add_balance(self, user_id: int, amount: float) -> None:
         with self._lock:
+            self._sync()
             new_val = round(self.get_balance(user_id) + float(amount), 2)
             self.update_user(user_id, balance=new_val)
 
@@ -1165,6 +1232,7 @@ class Storage:
         threshold = int(policy.get("decline_streak_block_threshold", 3))
         block_min = int(policy.get("decline_streak_block_minutes", 30))
         with self._lock:
+            self._sync()
             u = self.users.get(int(driver_id))
             if u is None:
                 return False
@@ -1183,6 +1251,7 @@ class Storage:
         block_min = int(policy.get("cancel_day_block_minutes", 60))
         today = datetime.now().strftime("%Y-%m-%d")
         with self._lock:
+            self._sync()
             u = self.users.get(int(driver_id))
             if u is None:
                 return False
@@ -1199,6 +1268,7 @@ class Storage:
 
     def reset_driver_decline_streak(self, driver_id: int) -> None:
         with self._lock:
+            self._sync()
             u = self.users.get(int(driver_id))
             if u is not None:
                 u["decline_streak"] = 0
@@ -1216,6 +1286,7 @@ class Storage:
                         hours: int = 0, description: str = "") -> None:
         """Добавить запись о транзакции."""
         with self._lock:
+            self._sync()
             u = self.users.setdefault(int(user_id), {
                 "user_id": int(user_id), "type": ROLE_PASSENGER,
                 "active_role": ROLE_PASSENGER, "driver_verification_status": "",
@@ -1316,6 +1387,7 @@ class Storage:
 
     def add_to_driver_queue(self, driver_id: int, order_id: int) -> bool:
         with self._lock:
+            self._sync()
             u = self.users.get(int(driver_id))
             if u is None:
                 return False
@@ -1328,6 +1400,7 @@ class Storage:
 
     def remove_from_driver_queue(self, driver_id: int, order_id: int) -> None:
         with self._lock:
+            self._sync()
             u = self.users.get(int(driver_id), {})
             q = u.get("driver_order_queue")
             if q and order_id in q:
@@ -1412,6 +1485,7 @@ class Storage:
     def delete_user(self, user_id: int) -> bool:
         uid = int(user_id)
         with self._lock:
+            self._sync()
             if uid not in self.users:
                 return False
             del self.users[uid]
@@ -1534,12 +1608,14 @@ class Storage:
     def get_driver_session(self, driver_id: int) -> Dict[str, Any]:
         """Get driver session for state management."""
         with self._lock:
+            self._sync()
             return self.driver_sessions.get(int(driver_id), {})
 
     def set_driver_session(self, driver_id: int, state: str = "IDLE",
                            **kwargs: Any) -> None:
         """Set or update driver session."""
         with self._lock:
+            self._sync()
             session = self.driver_sessions.setdefault(int(driver_id), {
                 "driver_id": int(driver_id),
                 "state": state,
@@ -1629,6 +1705,7 @@ class Storage:
 
     def update_behavior_policy(self, changes: dict) -> dict:
         with self._lock:
+            self._sync()
             p = self.get_behavior_policy()
             p.update(changes)
             self.admin_data["behavior_policy"] = p
@@ -1666,6 +1743,7 @@ class Storage:
 
     def set_content(self, key: str, value: str) -> None:
         with self._lock:
+            self._sync()
             self.admin_data[key] = value
             self.save()
 
@@ -1782,6 +1860,7 @@ class Storage:
         Returns: сколько водителей затронуто.
         """
         with self._lock:
+            self._sync()
             affected = 0
             for uid, u in self.users.items():
                 if uid in settings.admin_ids:
@@ -1804,12 +1883,14 @@ class Storage:
     def enable_commission(self) -> None:
         """Включить комиссию и разрешить показ балансов."""
         with self._lock:
+            self._sync()
             self.set_commission(enabled=True)
             self.set_balances_disabled(False)
 
     def reset_all_driver_balances(self) -> int:
         """Обнулить балансы всех водителей (без изменения режима комиссии)."""
         with self._lock:
+            self._sync()
             n = 0
             for uid, u in self.users.items():
                 if uid in settings.admin_ids:
