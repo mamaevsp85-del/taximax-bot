@@ -562,42 +562,53 @@ def own_order(uid: int, oid: int, as_driver=False) -> dict:
     return order
 
 
-def complete(uid: int, oid: int, lat: float, lon: float) -> dict:
+def complete(uid: int, oid: int, lat: float | None = None, lon: float | None = None) -> dict:
     order = own_order(uid, oid, as_driver=True)
-    if order.get("status") not in ("in_progress", "driver_arrived"):
+    if order.get("status") not in ("in_progress", "driver_arrived", "accepted"):
         raise ValueError("Завершить можно поездку в пути")
 
-    async def work():
-        p = order.get("pickup_coords") or {}
-        plat = p.get("lat", p.get("latitude"))
-        plon = p.get("lon", p.get("longitude"))
+    has_coords = lat is not None and lon is not None
+
+    if has_coords:
+        async def work():
+            p = order.get("pickup_coords") or {}
+            plat = p.get("lat", p.get("latitude"))
+            plon = p.get("lon", p.get("longitude"))
+            new_distance = float(order.get("distance") or 0)
+            new_duration = int(order.get("time_minutes") or 0)
+            if plat and plon:
+                new_distance, new_duration = await route_fast([
+                    (float(plat), float(plon)), (lat, lon),
+                ])
+            address, city = await geocoder.get_address_by_coordinates(lat, lon)
+            return address, city, new_distance, new_duration
+
+        address, city, new_distance, new_duration = run(work())
+    else:
+        # Без гео: сохраняем уже известные расстояние, время и адрес
+        address = order.get("destination") or ""
+        city = order.get("destination_city") or ""
         new_distance = float(order.get("distance") or 0)
         new_duration = int(order.get("time_minutes") or 0)
-        if plat and plon:
-            new_distance, new_duration = await route_fast([
-                (float(plat), float(plon)), (lat, lon),
-            ])
-        address, city = await geocoder.get_address_by_coordinates(lat, lon)
-        return address, city, new_distance, new_duration
-
-    address, city, new_distance, new_duration = run(work())
     old_price = float(order.get("price") or 0)
     new_price = calculate_trip_price(
         new_distance, new_duration,
         pickup_city=order.get("pickup_city"),
         destination_city=city or order.get("destination_city"),
     )
-    S.update_order(
-        oid,
-        destination=address or order.get("destination") or "",
-        destination_city=city or order.get("destination_city") or "",
-        destination_coords={"lat": lat, "lon": lon},
-        distance=new_distance,
-        time_minutes=new_duration,
-        price=new_price,
-        original_price=old_price,
-        recalculated_at=datetime.now().isoformat(),
-    )
+    update_fields = {
+        "destination": address or order.get("destination") or "",
+        "destination_city": city or order.get("destination_city") or "",
+        "distance": new_distance,
+        "time_minutes": new_duration,
+        "price": new_price,
+        "original_price": old_price,
+        "recalculated_at": datetime.now().isoformat(),
+    }
+    # Координаты высадки сохраняем только если они реально пришли
+    if has_coords:
+        update_fields["destination_coords"] = {"lat": lat, "lon": lon}
+    S.update_order(oid, **update_fields)
     stop_waiting(oid)
     cancel_waiting_ticker(oid)
     waiting_cost = calculate_waiting_cost(oid) or 0
@@ -940,7 +951,15 @@ def act(uid: int, body: dict) -> dict:
         S.update_order(order["id"], status="in_progress", started_at=datetime.now().isoformat())
         return {"ok": True}
     if op == "driver.complete":
-        return {"ok": True, "order": complete(uid, int(body["id"]), float(body["lat"]), float(body["lon"]))}
+        # Координаты необязательны: без гео завершаем по сохранённому адресу
+        lat = body.get("lat")
+        lon = body.get("lon")
+        try:
+            lat = float(lat) if lat is not None else None
+            lon = float(lon) if lon is not None else None
+        except (TypeError, ValueError):
+            lat = lon = None
+        return {"ok": True, "order": complete(uid, int(body["id"]), lat, lon)}
     if op == "driver.cancel":
         order = own_order(uid, int(body["id"]), as_driver=True)
         if order.get("status") not in ACTIVE:
