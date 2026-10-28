@@ -785,6 +785,42 @@
     }
   }
 
+  // ==================== ЗАПОМИНАНИЕ ПОЛЬЗОВАТЕЛЯ ====================
+  var UID_KEY = "maximus_uid";
+
+  function savedUid() {
+    try {
+      var v = localStorage.getItem(UID_KEY);
+      return v ? Number(v) : 0;
+    } catch (e) { return 0; }
+  }
+
+  function rememberUid(id) {
+    var n = Number(id) || 0;
+    if (n > 0) {
+      try { localStorage.setItem(UID_KEY, String(n)); } catch (e) {}
+    }
+    return n;
+  }
+
+  // Сохраняем uid и в cookie — на случай, если localStorage в iframe заблокирован
+  function rememberUidCookie(id) {
+    var n = Number(id) || 0;
+    if (n > 0) {
+      try {
+        document.cookie = UID_KEY + "=" + n + "; path=/; max-age=31536000; SameSite=Lax";
+      } catch (e) {}
+    }
+    return n;
+  }
+
+  function savedUidCookie() {
+    try {
+      var m = document.cookie.match(new RegExp("(?:^|; )" + UID_KEY + "=([^;]*)"));
+      return m ? Number(m[1]) : 0;
+    } catch (e) { return 0; }
+  }
+
   // ==================== АВТОДОПОЛНЕНИЕ АДРЕСА ====================
   var _suggestTimer = null;
   var _suggestSeq = 0;
@@ -1289,12 +1325,25 @@
   var start = window.Maximus.startParam();
   // Страховка: заставка не должна висеть дольше 6 секунд
   setTimeout(hideSplash, 6000);
-  // Also check URL parameters for uid (MAX may pass it via URL)
   var urlParams = new URLSearchParams(window.location.search);
   var urlUid = urlParams.get('uid') || urlParams.get('user_id') || '';
+
+  // Порядок определения пользователя:
+  // 1) данные из MAX, 2) uid в URL, 3) сохранённый uid в localStorage
   if (!maxUser && urlUid) {
     maxUser = { id: Number(urlUid), name: urlParams.get('name') || '', username: '', photo: '' };
   }
+  if (!maxUser || !maxUser.id) {
+    var stored = savedUid() || savedUidCookie();
+    if (stored) {
+      maxUser = { id: stored, name: "", username: "", photo: "" };
+    }
+  }
+  if (maxUser && maxUser.id) {
+    rememberUid(maxUser.id);
+    rememberUidCookie(maxUser.id);
+  }
+
   var stateUrl = "/api/state";
   if (maxUser && maxUser.id) {
     stateUrl += "?uid=" + maxUser.id;
@@ -1318,17 +1367,23 @@
     setTimeout(hideSplash, 420);
     probeGeolocation();
   }).catch(function (err) {
-    if (maxUser && maxUser.id) {
-      api("/api/act", { op: "login", max_id: maxUser.id, name: maxUser.name }).then(function (data) {
+    // Не смогли получить состояние — пробуем войти по известному uid
+    var fallbackId = (maxUser && maxUser.id) || savedUid();
+    if (fallbackId) {
+      api("/api/act", { op: "login", max_id: fallbackId, name: (maxUser && maxUser.name) || "" }).then(function (data) {
         if (data.state) {
           S = normalizeState(data.state);
+          rememberUid(fallbackId);
           if (maxUser) window.Maximus.storeUser(maxUser);
           setSplashRole(S.user.role);
           screen = entryScreen();
           render();
           setTimeout(hideSplash, 420);
+          return;
         }
-      }).catch(function (e2) {
+        showPeople();
+        setTimeout(hideSplash, 300);
+      }).catch(function () {
         showPeople();
         setTimeout(hideSplash, 300);
       });

@@ -59,18 +59,20 @@ def run(coro):
 
 
 def uid_from(handler, body: dict | None = None) -> int:
-    """ID пользователя: cookie `mx` -> ?uid= в URL -> поле uid в теле запроса."""
+    """ID пользователя: cookie mx -> cookie maximus_uid -> ?uid= -> тело запроса."""
     raw = handler.headers.get("Cookie") or ""
     jar = SimpleCookie()
     jar.load(raw)
-    morsel = jar.get("mx")
-    if morsel:
-        try:
-            uid = int(morsel.value)
-            if uid > 0:
-                return uid
-        except ValueError:
-            pass
+
+    for cookie_name in ("mx", "maximus_uid"):
+        morsel = jar.get(cookie_name)
+        if morsel:
+            try:
+                uid = int(morsel.value)
+                if uid > 0:
+                    return uid
+            except ValueError:
+                pass
 
     query = parse_qs(urlparse(handler.path).query)
     for key in ("uid", "user_id"):
