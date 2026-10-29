@@ -147,6 +147,7 @@
     S = normalizeState(await api("/api/state"));
     render();
   }
+
   function predict(body) {
     if (!S || !S.user) return;
     var op = body.op;
@@ -782,10 +783,42 @@
     if (S && S.user && S.user.role) {
       document.body.dataset.role = S.user.role;
     }
+    // Сохраняем то, что пользователь уже ввёл в поля
+    var focused = document.activeElement;
+    var focusedId = focused && focused.id ? focused.id : "";
+    var typed = {};
+    var inputs = document.querySelectorAll("input");
+    for (var i = 0; i < inputs.length; i++) {
+      if (inputs[i].id) typed[inputs[i].id] = inputs[i].value;
+    }
+    var caret = 0;
+    if (focused && typeof focused.selectionStart === "number") {
+      caret = focused.selectionStart;
+    }
+
     $("top").innerHTML = header();
     $("tabs").innerHTML = tabs();
     var fn = views[screen];
     $("view").innerHTML = fn ? fn() : "<p>Экран не найден</p>";
+
+    // Возвращаем введённый текст
+    var after = document.querySelectorAll("input");
+    for (var j = 0; j < after.length; j++) {
+      var id = after[j].id;
+      if (id && typed[id]) after[j].value = typed[id];
+    }
+    // Возвращаем фокус и курсор
+    if (focusedId) {
+      var again = document.getElementById(focusedId);
+      if (again) {
+        try {
+          again.focus();
+          if (typeof again.setSelectionRange === "function") {
+            again.setSelectionRange(caret, caret);
+          }
+        } catch (e) {}
+      }
+    }
 
     // Подключаем автодополнение адреса на нужных экранах
     if (screen === "trip") {
@@ -1254,21 +1287,34 @@
     }
   }
 
-  // Возврат в приложение: сразу обновляем состояние
+  // Возврат в приложение: обновляем, но с защитой от циклов
+  var _lastRefresh = 0;
+
+  function softRefresh() {
+    if (!S || !maxUser || !maxUser.id) return;
+    // Не чаще раза в 3 секунды — иначе focus-события в iframe
+    // вызывают бесконечную перерисовку
+    var now = Date.now();
+    if (now - _lastRefresh < 3000) return;
+    _lastRefresh = now;
+    // Не перерисовываем, если пользователь печатает
+    var el = document.activeElement;
+    if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
+    refresh().catch(function () {});
+  }
+
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) {
       stopKeepAlive();
       return;
     }
     startKeepAlive();
-    if (S && maxUser && maxUser.id) {
-      refresh().catch(function () {});
-    }
+    softRefresh();
   });
 
   window.addEventListener("focus", function () {
     startKeepAlive();
-    if (S && maxUser && maxUser.id) refresh().catch(function () {});
+    softRefresh();
   });
 
   window.addEventListener("blur", stopKeepAlive);
@@ -1337,7 +1383,7 @@
     }
   }
 
-  // Опрос состояния — работает на ВСЕХ экранах, чтобы ловить уведомления
+  // Опрос состояния — уведомления без перерисовки, чтобы не стирать ввод
   setInterval(function () {
     if (!S || inflight) return;
     var stateUrl = "/api/state";
@@ -1345,9 +1391,9 @@
     api(stateUrl).then(function (data) {
       if (inflight) return;
       if (!data || data.ok === false) return;
+      // Только уведомления и точечное обновление — БЕЗ render()
       checkStatusChanges(data);
       S = normalizeState(data);
-      render();
     }).catch(function () {});
   }, 5000);
 
