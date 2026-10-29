@@ -1571,6 +1571,12 @@ async def _finalize_trip_with_geo(client, user_id: int, oid: int,
         except (TypeError, ValueError):
             pid_int = None
         if pid_int:
+            # Пассажир видит полные детали поездки (маршрут, километры, время,
+            # стоимость и автомобиль) и может сразу сохранить маршрут в избранное.
+            me = S.get_user(user_id) or {}
+            car_txt = " ".join(str(x) for x in (me.get("car_model"),
+                                                me.get("car_number")) if x)
+            passenger_details = details + (f"\n🚗 {car_txt}" if car_txt else "")
             kb = [[
                 callback_button("⭐", f"passenger:rate:{oid}:1"),
                 callback_button("⭐⭐", f"passenger:rate:{oid}:2"),
@@ -1578,11 +1584,15 @@ async def _finalize_trip_with_geo(client, user_id: int, oid: int,
                 callback_button("⭐⭐⭐⭐", f"passenger:rate:{oid}:4"),
                 callback_button("⭐⭐⭐⭐⭐", f"passenger:rate:{oid}:5"),
             ],
+                [callback_button("⭐ Сохранить маршрут в избранное",
+                                 f"passenger:fav_add:{oid}"),
+                 callback_button("📋 Детали заказа", f"passenger:order:{oid}")],
                 [callback_button("↪️ В меню", "passenger:menu")],
             ]
             await client.send_message(
                 user_id=pid_int,
-                text=f"✅ Поездка #{oid} завершена!\n\n{details}\n\nОцените водителя ⭐",
+                text=(f"✅ <b>Поездка #{oid} завершена!</b>\n\n{passenger_details}\n\n"
+                      "Оцените водителя или сохраните маршрут в избранное:"),
                 attachments=[{"type": "inline_keyboard", "payload": {"buttons": kb}}])
             start_relay_session(user_id, pid_int, oid, hours=24.0)
     await _Reply(client, user_id).send(

@@ -96,6 +96,97 @@ async def notify_drivers_about_order(client, order_id: int) -> None:
             logger.warning("Не удалось уведомить водителя %s: %s", did, exc)
 
 
+ORDER_STATUS_NAMES = {
+    "pending": "🔎 Ищем водителя",
+    "accepted": "🚗 Водитель назначен",
+    "driver_arrived": "📍 Водитель на месте",
+    "in_progress": "🚖 В пути",
+    "completed": "✅ Завершён",
+    "cancelled": "❌ Отменён",
+}
+
+
+def _fmt_km(value) -> str:
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_minutes(value) -> str:
+    try:
+        return str(int(float(value)))
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_rub(value) -> str:
+    try:
+        return f"{float(value):.0f} руб."
+    except (TypeError, ValueError):
+        return "—"
+
+
+def build_order_receipt(order: dict) -> str:
+    """Детали заказа для пассажира: маршрут, водитель и разбивка стоимости.
+
+    Используется и в карточке заказа, и в сообщении о завершении поездки,
+    чтобы пассажир видел одинаковые детали в боте и в мини-приложении.
+    """
+    if not order:
+        return "🚖 <b>Заказ</b>\n\nДанные заказа недоступны."
+    oid = order.get("id")
+    status = order.get("status")
+    pickup = order.get("pickup") or order.get("pickup_address") or "—"
+    destination = order.get("destination") or order.get("dropoff_address") or "—"
+    base_price = order.get("price") or 0
+    waiting_cost = order.get("waiting_cost") or 0
+    total = order.get("final_price") or base_price
+
+    lines = [
+        f"🚖 <b>Заказ #{oid}</b>",
+        f"📋 Статус: {ORDER_STATUS_NAMES.get(status, status or '—')}",
+        "",
+        f"📍 {pickup}",
+        f"🎯 {destination}",
+    ]
+
+    waypoints = order.get("waypoints") or []
+    stops = [str(w.get("address") or "").strip() for w in waypoints
+             if isinstance(w, dict) and str(w.get("address") or "").strip()]
+    if stops:
+        lines.append(f"🛑 Остановки: {', '.join(stops)}")
+
+    lines += [
+        "",
+        f"📏 Расстояние: {_fmt_km(order.get('distance'))} км",
+        f"⏱ Время в пути: {_fmt_minutes(order.get('time_minutes'))} мин",
+    ]
+
+    driver_id = order.get("driver_id")
+    if driver_id:
+        driver = S.get_user(driver_id) or {}
+        name = driver.get("driver_name") or driver.get("name")
+        car = " ".join(str(x) for x in (driver.get("car_model"),
+                                        driver.get("car_number")) if x)
+        color = driver.get("car_color")
+        if name:
+            lines.append(f"👤 Водитель: {name}")
+        if car:
+            lines.append(f"🚗 {car}" + (f" ({color})" if color else ""))
+
+    lines.append("")
+    lines.append(f"💰 Поездка: {_fmt_rub(base_price)}")
+    if waiting_cost:
+        lines.append(f"⏳ Ожидание: {_fmt_rub(waiting_cost)}")
+    lines.append(f"<b>Итого: {_fmt_rub(total)}</b>")
+
+    rating = order.get("passenger_rating")
+    if rating:
+        lines.append(f"⭐ Ваша оценка: {rating}/5")
+    return "\n".join(lines)
+
+
 def register_passenger(router: Router) -> None:
     # ==================== ЗАПОЛНЕНИЕ ПРОФИЛЯ (имя + телефон) ====================
     async def ask_profile(client, user_id, update, ctx):
@@ -570,33 +661,44 @@ def register_passenger(router: Router) -> None:
             await reply.send("❌ Заказ не найден.",
                              keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
             return
-        status_names = {
-            "pending": "🔎 Ищем водителя",
-            "accepted": "🚗 Водитель назначен",
-            "driver_arrived": "📍 Водитель на месте",
-            "in_progress": "🚖 В пути",
-            "completed": "✅ Завершён",
-            "cancelled": "❌ Отменён",
-        }
         driver_name = "—"
         car = "—"
         if order.get("driver_id"):
             d = S.get_user(order["driver_id"]) or {}
             driver_name = f"{d.get('driver_name') or d.get('name') or '—'}"
             car = f"{d.get('car_model') or ''} {d.get('car_number') or ''} ({d.get('car_color') or ''})"
-        text = (
-            f"🚖 <b>Заказ #{order_id}</b>\n\n"
-            f"📋 Статус: {status_names.get(order.get('status', 'pending'), order.get('status'))}\n\n"
-            f"📍 {order['pickup']}\n"
-            f"🎯 {order['destination']}\n\n"
-            f"💰 Стоимость: {order.get('price', 0)} руб.\n\n"
-        )
-        if order.get("driver_id"):
-            text += (
-                f"👤 Водитель: {driver_name}\n"
-                f"🚗 {car}\n\n"
+        if order.get("status") == "completed":
+            # Завершённая поездка — полные детали (маршрут, километры,
+            # время, разбивка стоимости) и предложение сохранить маршрут.
+            text = build_order_receipt(order)
+        else:
+            text = (
+                f"🚖 <b>Заказ #{order_id}</b>\n\n"
+                f"📋 Статус: {ORDER_STATUS_NAMES.get(order.get('status', 'pending'), order.get('status'))}\n\n"
+                f"📍 {order['pickup']}\n"
+                f"🎯 {order['destination']}\n\n"
+                f"💰 Стоимость: {order.get('price', 0)} руб.\n\n"
             )
+            if order.get("driver_id"):
+                text += (
+                    f"👤 Водитель: {driver_name}\n"
+                    f"🚗 {car}\n\n"
+                )
         rows = []
+        if order["status"] == "completed":
+            favorite_ids = {f.get("order_id") for f in S.get_favorites(user_id)}
+            if order_id not in favorite_ids:
+                rows.append([callback_button("⭐ Сохранить маршрут в избранное",
+                                             f"passenger:fav_add:{order_id}")])
+            if not order.get("passenger_rating"):
+                rows.append([callback_button("⭐" * n, f"passenger:rate:{order_id}:{n}")
+                             for n in range(1, 6)])
+            if order.get("driver_id"):
+                rows.append([callback_button("💬 Написать водителю",
+                                             f"passenger:contact:{order_id}")])
+            rows.append([callback_button("↪️ Меню", "passenger:menu")])
+            await reply.send(text, keyboard=rows)
+            return
         if order["status"] in ("pending", "accepted", "driver_arrived"):
             rows.append([callback_button("❌ Отменить заказ", f"passenger:cancel:{order_id}")])
             rows.append([callback_button("💬 Предложить свою цену",
@@ -1000,6 +1102,14 @@ def register_passenger(router: Router) -> None:
             return
         label = f"{order.get('pickup', '')} → {order.get('destination', '')}"
         S.add_favorite(user_id, order_id, label=label)
+        if order.get("status") == "completed":
+            # Детали поездки остаются на экране — пассажир видит,
+            # что именно сохранено в избранное.
+            await reply.send(
+                build_order_receipt(order) + "\n\n⭐ Маршрут сохранён в избранное.",
+                keyboard=[[callback_button("⭐ Избранное", "passenger:favorites")],
+                          [callback_button("↪️ Меню", "passenger:menu")]])
+            return
         await reply.send(
             f"⭐ Заказ #{order_id} добавлен в избранное.",
             keyboard=[[callback_button("⭐ Избранное", "passenger:favorites")],

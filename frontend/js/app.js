@@ -236,6 +236,84 @@
       "<small>" + esc(o.destination) + "</small></div><div class=\"muted\" style=\"margin-top:6px\">#" + o.id + " · " +
       Number(o.distance || 0).toFixed(1) + " км</div></button>";
   }
+  function orderById(id) {
+    var pool = [].concat(
+      (S && S.passenger && S.passenger.orders) || [],
+      (S && S.passenger && S.passenger.active) ? [S.passenger.active] : [],
+      (S && S.driver && S.driver.current) ? [S.driver.current] : [],
+      (S && S.driver && S.driver.history) || []
+    );
+    for (var i = 0; i < pool.length; i++) {
+      if (pool[i] && String(pool[i].id) === String(id)) return pool[i];
+    }
+    return null;
+  }
+  function starsText(n) {
+    var count = Math.max(0, Math.min(5, Number(n) || 0));
+    return new Array(count + 1).join("★");
+  }
+
+  // ==================== ДЕТАЛИ ПОЕЗДКИ ====================
+  // Итоговая стоимость: после завершения цена пересчитывается
+  // (final_price = поездка + ожидание).
+  function orderPrice(o) {
+    if (!o) return 0;
+    var total = o.final_price;
+    return total != null && total !== "" ? total : (o.price || 0);
+  }
+  function favoriteIndex(orderId) {
+    var favs = (S && S.passenger && S.passenger.favorites) || [];
+    for (var i = 0; i < favs.length; i++) {
+      if (favs[i] && String(favs[i].order_id) === String(orderId)) return i;
+    }
+    return -1;
+  }
+  function isFavorite(orderId) {
+    return favoriteIndex(orderId) >= 0;
+  }
+  function fmtDateTime(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    function two(n) { return (n < 10 ? "0" : "") + n; }
+    return two(d.getDate()) + "." + two(d.getMonth() + 1) + "." + d.getFullYear() +
+      " " + two(d.getHours()) + ":" + two(d.getMinutes());
+  }
+  function detailLine(label, value) {
+    return '<div class="doc"><span>' + esc(label) + "</span><b>" + esc(value) + "</b></div>";
+  }
+  // Километры, время в пути, ожидание и итог
+  function orderDetails(o) {
+    var base = o.base_price != null && o.base_price !== "" ? o.base_price : o.price;
+    var waiting = Number(o.waiting_cost || 0);
+    var rows = detailLine("Расстояние", Number(o.distance || 0).toFixed(1) + " км") +
+      detailLine("Время в пути", Number(o.time_minutes || 0) + " мин");
+    if (waiting > 0) {
+      rows += detailLine("Поездка", money(base)) + detailLine("Ожидание", money(waiting));
+    }
+    rows += detailLine("Итого", money(orderPrice(o)));
+    if (o.completed_at) rows += detailLine("Завершена", fmtDateTime(o.completed_at));
+    return rows;
+  }
+  function driverCard(o) {
+    if (!o.driver_name) return "";
+    var car = [o.car_model, o.car_number, o.car_color].filter(Boolean).join(" · ");
+    return '<div class="card"><b>' + esc(o.driver_name) + '</b><p class="muted">' + esc(car) +
+      (o.driver_phone ? "<br>" + esc(o.driver_phone) : "") + "</p></div>";
+  }
+  // Предложение сохранить маршрут в избранное
+  function favoriteOffer(o) {
+    var idx = favoriteIndex(o.id);
+    if (idx >= 0) {
+      return '<div class="card fav-offer"><div class="row"><b>⭐ Маршрут в избранном</b></div>' +
+        '<p class="muted">В следующий раз закажете в один клик — без ввода адресов.</p>' +
+        '<button class="btn ghost" data-act="use-fav" data-index="' + idx + '">🚕 Заказать снова</button></div>';
+    }
+    return '<div class="card fav-offer"><div class="row"><b>⭐ Сохранить маршрут?</b></div>' +
+      '<p class="muted">Добавим адреса в избранное — заказ в один клик в следующий раз.</p>' +
+      '<button class="btn yellow" data-act="fav-add" data-id="' + o.id + '">⭐ В избранное</button>' +
+      '<button class="btn ghost" data-act="tab" data-screen="home">Не сейчас</button></div>';
+  }
   function field(id, label, value, placeholder) {
     return '<label class="field"><span>' + label + '</span><input id="' + id + '" value="' + esc(value || "") + '" placeholder="' + esc(placeholder || "") + '"></label>';
   }
@@ -293,23 +371,48 @@
         '<div class="btn-row"><button class="btn ghost" data-act="sheet-price">Своя цена</button><button class="btn ghost" data-act="sheet-stop">Остановка</button></div>';
     },
     live: function () {
-      var o = (S.passenger.orders || []).filter(function (x) { return x.id === picked; })[0] || S.passenger.active;
+      var o = (S.passenger.orders || []).filter(function (x) { return String(x.id) === String(picked); })[0] || S.passenger.active;
       if (!o) return "<h2>Заказ</h2><p class=\"muted\">Заказ не найден.</p>";
       var canCancel = ["pending", "accepted", "driver_arrived"].indexOf(o.status) >= 0;
+      var isDone = ["completed", "cancelled"].indexOf(o.status) >= 0;
       var driver = o.driver_name ? '<div class="card"><b>' + esc(o.driver_name) + '</b><p class="muted">' +
         esc([o.car_model, o.car_number, o.car_color].filter(Boolean).join(" · ")) + "<br>" + esc(o.driver_phone) + "</p>" +
         '<div class="btn-row"><button class="btn ghost" data-act="sheet-chat" data-id="' + o.id + '">Написать</button>' +
         '<button class="btn ghost" data-act="max-call" data-peer="' + esc(o.driver_id || "") + '" data-phone="' + esc(o.driver_phone) + '">📞 Позвонить</button></div></div>' : "";
       return '<div class="row"><h2 style="margin:0">Заказ #' + o.id + "</h2>" + badge(o.status) + "</div>" +
         '<div class="card"><div class="route">' + esc(o.pickup) + "<small>" + esc(o.destination) + "</small></div>" +
-        '<div class="row" style="margin-top:10px"><span class="muted">' + Number(o.distance).toFixed(1) + " км</span><b>" + money(o.price) + "</b></div></div>" +
+        '<div class="row" style="margin-top:10px"><span class="muted">' + Number(o.distance || 0).toFixed(1) +
+        " км</span><b>" + money(orderTotal(o)) + "</b></div></div>" +
+        (isDone ? orderDetails(o) : "") +
         driver +
         (canCancel ? '<button class="btn ghost" data-act="sheet-price-live" data-id="' + o.id + '">Предложить свою цену</button>' +
           '<button class="btn ghost" data-act="sheet-complaint" data-id="' + o.id + '">Жалоба на авто</button>' +
           '<button class="btn danger" data-act="cancel" data-id="' + o.id + '">Отменить заказ</button>' : "") +
+        (o.status === "completed" ? favoriteOffer(o) : "") +
         (o.status === "completed" && !o.rating ? '<button class="btn yellow" data-act="to-rate" data-id="' + o.id + '">Оценить поездку</button>' : "") +
-        (o.status === "completed" ? '<button class="btn ghost" data-act="fav-add" data-id="' + o.id + '">⭐ В избранное</button>' : "") +
+        (o.rating ? '<p class="note">Ваша оценка: ' + esc(starsText(o.rating)) + "</p>" : "") +
         (o.complaint ? '<p class="note">Жалоба: ' + esc(o.complaint) + "</p>" : "");
+    },
+    receipt: function () {
+      var o = orderById(picked) || (S.passenger && S.passenger.active);
+      if (!o) return "<h2>Детали поездки</h2><p class=\"list-empty\">Заказ не найден</p>" +
+        '<button class="btn ghost" data-act="tab" data-screen="home">На главную</button>';
+      var done = o.status === "completed";
+      var head = done
+        ? '<div class="receipt-hero"><div class="receipt-check">✓</div><h1>Поездка завершена</h1>' +
+          '<p class="muted">Заказ #' + o.id + (o.completed_at ? " · " + esc(fmtDateTime(o.completed_at)) : "") + "</p></div>"
+        : '<div class="row"><h2 style="margin:0">Заказ #' + o.id + "</h2>" + badge(o.status) + "</div>";
+      return head +
+        '<div class="card"><div class="route">' + esc(o.pickup) + "<small>" + esc(o.destination) + "</small></div></div>" +
+        orderDetails(o) +
+        driverCard(o) +
+        (done ? favoriteOffer(o) : "") +
+        (done && !o.rating
+          ? '<button class="btn yellow" data-act="to-rate" data-id="' + o.id + '">Оценить поездку</button>'
+          : "") +
+        (o.rating ? '<p class="note">Ваша оценка: ' + esc(starsText(o.rating)) + "</p>" : "") +
+        (o.complaint ? '<p class="note">Жалоба: ' + esc(o.complaint) + "</p>" : "") +
+        '<button class="btn ghost" data-act="tab" data-screen="home">Готово</button>';
     },
     orders: function () {
       var list = (S.passenger.orders || []).filter(function (o) { return ["pending", "accepted", "driver_arrived", "in_progress"].indexOf(o.status) >= 0; });
@@ -394,15 +497,28 @@
       var oid = window._favOrder;
       var pool = (S.passenger && S.passenger.orders) || [];
       var o = pool.filter(function (x) { return x && x.id === oid; })[0] || {};
+      var saved = !!(S.passenger.favorites || []).filter(function (f) {
+        return Number(f.order_id) === Number(oid);
+      }).length;
       return '<div class="onb-hero">' +
         '<div class="onb-logo">⭐</div>' +
-        '<h1>Сохранить маршрут?</h1>' +
-        '<p class="muted">В следующий раз закажете в один клик — без ввода адресов.</p>' +
+        '<h1>Поездка завершена</h1>' +
+        '<p class="muted">Сохраните маршрут, чтобы в следующий раз заказать его в один клик.</p>' +
         '</div>' +
-        '<div class="card"><div class="route">' + esc(o.pickup || "—") +
-        "<small>" + esc(o.destination || "—") + "</small></div></div>" +
-        '<button class="btn" data-act="fav-save">⭐ Сохранить в избранное</button>' +
-        '<button class="btn ghost" data-act="fav-skip">Не сейчас</button>';
+        '<div class="card order-details">' +
+          '<div class="row"><b>Заказ #' + oid + '</b>' + badge("completed") + '</div>' +
+          '<div class="route" style="margin-top:14px">' + esc(o.pickup || "—") +
+            '<small>' + esc(o.destination || "—") + '</small></div>' +
+          '<div class="row" style="margin-top:14px"><span class="muted">Расстояние</span><b>' + Number(o.distance || 0).toFixed(1) + ' км</b></div>' +
+          '<div class="row"><span class="muted">Время</span><b>' + (o.time_minutes || 0) + ' мин</b></div>' +
+          '<div class="row"><span class="muted">Стоимость</span><b>' + money(o.final_price || o.price) + '</b></div>' +
+          (o.completed_at ? '<div class="row"><span class="muted">Завершена</span><b>' + esc(fmtDateTime(o.completed_at)) + '</b></div>' : '') +
+        '</div>' +
+        driverCard(o) +
+        (saved ? '<div class="note">⭐ Этот маршрут уже в избранном</div>' :
+          '<button class="btn" data-act="fav-save">⭐ Сохранить маршрут в избранное</button>') +
+        '<button class="btn ghost" data-act="go-receipt">📋 Детали поездки</button>' +
+        '<button class="btn ghost" data-act="fav-skip">Продолжить</button>';
     },
     driver: function () {
       var u = S.user;
@@ -969,6 +1085,7 @@
       screen = "home";
       render();
     },
+    "go-receipt": function () { go("receipt"); },
     "sheet-chat": function (el) {
       picked = Number(el.dataset.id);
       var pool = [].concat((S.passenger && S.passenger.orders) || [], (S.driver && S.driver.current) ? [S.driver.current] : [], (S.admin && S.admin.orders) || []);
@@ -1323,6 +1440,7 @@
   // ==================== УВЕДОМЛЕНИЯ ====================
   var _lastStatus = {};       // order_id -> последний известный статус
   var _notifySeen = {};       // чтобы не дублировать
+  var _offerShown = {};       // чтобы предложение избранного показывать один раз
 
   var STATUS_TEXT = {
     accepted: "Водитель принял заказ и едет к вам",
@@ -1344,6 +1462,30 @@
     showBanner._t = setTimeout(function () {
       el.classList.remove("show");
     }, 6000);
+  }
+
+  // Свежезавершённый заказ: если приложение открыли ПОСЛЕ завершения поездки
+  // (переход статуса уже не поймать), всё равно показываем детали + предложение
+  // сохранить маршрут в избранное — но только для недавних поездок (до 30 мин).
+  function maybeOfferFreshCompleted(norm) {
+    if (!norm || !norm.passenger || !norm.user || norm.user.role !== "passenger") return;
+    var orders = norm.passenger.orders || [];
+    for (var i = 0; i < orders.length; i++) {
+      var o = orders[i];
+      if (!o || o.status !== "completed") continue;
+      var key = "o" + o.id;
+      if (_offerShown[key]) continue;
+      var at = o.completed_at ? new Date(o.completed_at).getTime() : 0;
+      if (!at) continue;
+      if ((Date.now() - at) / 60000 > 30) continue; // старые поездки не предлагаем
+      _offerShown[key] = true;
+      picked = Number(o.id);
+      window._favOrder = Number(o.id);
+      screen = "fav-offer";
+      render();
+      showBanner("Поездка #" + o.id + " завершена", "ok");
+      return;
+    }
   }
 
   function checkStatusChanges(data) {
@@ -1368,6 +1510,19 @@
       _lastStatus[key] = cur;
 
       if (!prev || prev === cur) continue;
+
+      // Пассажир, чей заказ завершился: показываем детали + предложение
+      if (cur === "completed" && S && S.user && S.user.role &&
+          S.user.role === "passenger" && _offerShown["o" + o.id] !== true) {
+        _offerShown["o" + o.id] = true;
+        picked = Number(o.id);
+        window._favOrder = Number(o.id);
+        screen = "fav-offer";
+        render();
+        showBanner("Поездка #" + o.id + " завершена", "ok");
+        continue;
+      }
+
       // Показываем уведомление только о значимых переходах
       var msg = STATUS_TEXT[cur];
       if (!msg) continue;
@@ -1391,9 +1546,12 @@
     api(stateUrl).then(function (data) {
       if (inflight) return;
       if (!data || data.ok === false) return;
-      // Только уведомления и точечное обновление — БЕЗ render()
-      checkStatusChanges(data);
+      // Сначала обновляем S, потом обрабатываем переходы.
+      // Иначе fav-offer рендерится со старым состоянием, где завершённого
+      // заказа ещё нет, и детали поездки показываются пустыми.
       S = normalizeState(data);
+      maybeOfferFreshCompleted(data);
+      checkStatusChanges(data);
     }).catch(function () {});
   }, 5000);
 
