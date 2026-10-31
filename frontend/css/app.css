@@ -1139,6 +1139,41 @@ select:focus {
 }
 
 /* =========================================================
+   ДЕТАЛИ ЗАВЕРШЁННОЙ ПОЕЗДКИ
+   ========================================================= */
+
+.order-details .row { margin-top: 10px; }
+.order-details .row:first-child { margin-top: 0; }
+
+.receipt-hero {
+  text-align: center;
+  padding: 20px 0 12px;
+  animation: onb-pop 0.6s var(--ease) backwards;
+}
+
+.receipt-check {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  background: var(--ok);
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+  font-size: 32px;
+  font-weight: 800;
+  box-shadow: 0 10px 30px rgba(6, 118, 71, 0.3);
+}
+
+.receipt-hero h1 {
+  margin: 0 0 6px;
+  font-family: Unbounded, Manrope, sans-serif;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+/* =========================================================
    ТОСТ
    ========================================================= */
 

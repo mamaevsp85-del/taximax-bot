@@ -382,7 +382,7 @@
       return '<div class="row"><h2 style="margin:0">Заказ #' + o.id + "</h2>" + badge(o.status) + "</div>" +
         '<div class="card"><div class="route">' + esc(o.pickup) + "<small>" + esc(o.destination) + "</small></div>" +
         '<div class="row" style="margin-top:10px"><span class="muted">' + Number(o.distance || 0).toFixed(1) +
-        " км</span><b>" + money(orderTotal(o)) + "</b></div></div>" +
+        " км</span><b>" + money(orderPrice(o)) + "</b></div></div>" +
         (isDone ? orderDetails(o) : "") +
         driver +
         (canCancel ? '<button class="btn ghost" data-act="sheet-price-live" data-id="' + o.id + '">Предложить свою цену</button>' +

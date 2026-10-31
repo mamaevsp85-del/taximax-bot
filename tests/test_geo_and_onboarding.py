@@ -98,11 +98,21 @@ class OnboardingOnceTests(unittest.TestCase):
         self.assertTrue(self.srv._profile_complete(u))
 
     def test_onboarded_stays_false_even_if_field_cleared(self):
-        """Прошёл знакомство — больше не спрашиваем, даже если поле пустое."""
+        """Прошёл знакомство — больше не спрашиваем, даже если поле пустое.
+
+        Город необязателен (правило: имя + телефон). Полное опустошение полей
+        тоже не возвращает знакомство — флаг onboarded уже выставлен.
+        """
         self.s.ensure_user(10)
         self.s.update_user(10, name="Иван", phone="79134430404", home_city="Черногорск")
         self.s.mark_onboarded(10)
+        # город необязателен — профиль остаётся полным
         self.s.update_user(10, home_city="")
+        u = self.s.get_user(10)
+        self.assertFalse(self.srv._needs_onboarding(u))
+        self.assertTrue(self.srv._profile_complete(u))
+        # даже полное опустошение не возвращает знакомство
+        self.s.update_user(10, name="", phone="")
         u = self.s.get_user(10)
         self.assertFalse(self.srv._needs_onboarding(u))
         self.assertFalse(self.srv._profile_complete(u))
