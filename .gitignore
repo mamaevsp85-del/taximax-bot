@@ -18,6 +18,7 @@ data/
 
 # Logs
 *.log
+logs/
 *.txt
 !requirements.txt
 *.out
