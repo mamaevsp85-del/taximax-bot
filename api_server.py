@@ -72,8 +72,9 @@ async def auth_middleware(request, handler):
     if path == '/' or path.startswith('/assets/') or path.startswith('/css/') or path.startswith('/js/'):
         return await handler(request)
     # Allow public endpoints without auth
-    public_paths = ('/health', '/se14566736_bot', '/ws', '/api/state', '/api/act', '/api/whoami')
-    if path in public_paths:
+    public_paths = ('/health', '/se14566736_bot', '/ws', '/api/state', '/api/act', '/api/whoami',
+                    '/api/photo')
+    if path in public_paths or path.startswith('/api/photo/'):
         return await handler(request)
     # Локальная разработка: список профилей и статус пользователя открыты
     # только на этом компьютере (аналог via_public_url в maximus_server.py).
@@ -357,6 +358,69 @@ async def users_register(request):
         return web.json_response({'error': str(exc)}, status=500)
 
 
+PHOTOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'photos')
+
+
+def _photo_path(user_id: int) -> str:
+    return os.path.join(PHOTOS_DIR, f"{int(user_id)}.jpg")
+
+
+async def photo_upload(request):
+    """Загрузка фото автомобиля водителем из Mini-App.
+
+    Принимает JSON {file: "data:image/jpeg;base64,..."}. UID определяется по
+    персональному токену/cookie (как в /api/act) или полю user_id в теле.
+    Сохраняет файл в data/photos/{uid}.jpg и пишет user.car_photo_path.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    try:
+        uid = _resolve_uid(request, data)
+        if not uid:
+            try:
+                uid = int(data.get('user_id', 0) or 0)
+            except (TypeError, ValueError):
+                uid = 0
+        if not uid:
+            return web.json_response({'ok': False, 'error': 'Not authenticated'}, status=403)
+        raw = data.get('file') or data.get('photo') or ''
+        if not raw:
+            return web.json_response({'ok': False, 'error': 'file required'}, status=400)
+        import base64
+        if ',' in raw:
+            _, raw = raw.split(',', 1)
+        payload = base64.b64decode(raw)
+        if not payload:
+            return web.json_response({'ok': False, 'error': 'empty file'}, status=400)
+        if len(payload) > 8 * 1024 * 1024:
+            return web.json_response({'ok': False, 'error': 'file too large (max 8MB)'}, status=400)
+        os.makedirs(PHOTOS_DIR, exist_ok=True)
+        with open(_photo_path(uid), 'wb') as f:
+            f.write(payload)
+        rel = f"data/photos/{int(uid)}.jpg"
+        storage.storage.update_user(uid, car_photo_path=rel)
+        return web.json_response({'ok': True, 'url': f'/api/photo/{int(uid)}'})
+    except Exception as exc:
+        logger.exception("Photo upload error")
+        return web.json_response({'ok': False, 'error': str(exc)}, status=500)
+
+
+async def photo_get(request):
+    """Отдать фото автомобиля водителя (для админки и Mini-App)."""
+    try:
+        uid = int(request.match_info['user_id'])
+    except (TypeError, ValueError, KeyError):
+        return web.Response(status=404, text='Not found')
+    path = _photo_path(uid)
+    if not os.path.isfile(path):
+        return web.Response(status=404, text='Not found')
+    with open(path, 'rb') as f:
+        data = f.read()
+    return web.Response(body=data, content_type='image/jpeg')
+
+
 async def drivers_register(request):
     try:
         data = await request.json()
@@ -373,6 +437,17 @@ async def drivers_register(request):
             return web.json_response({'error': 'name required'}, status=400)
         if not car_number:
             return web.json_response({'error': 'car_number required'}, status=400)
+        # Фото автомобиля обязательно: либо уже загружено через /api/photo,
+        # либо пришло в этом запросе (data-url).
+        existing = storage.storage.get_user(user_id) or {}
+        has_photo = bool(
+            (existing.get('car_photo_path') or '').strip()
+            or (existing.get('car_photo_token') or '').strip()
+            or (car_photo or '').strip()
+        )
+        if not has_photo:
+            return web.json_response(
+                {'error': 'Прикрепите фото автомобиля — это обязательно'}, status=400)
         
         # Ensure user exists as driver
         storage.storage.ensure_user(user_id, 'driver')
@@ -387,7 +462,7 @@ async def drivers_register(request):
         if car_color:
             fields['car_color'] = car_color
         if car_photo:
-            fields['car_photo'] = car_photo
+            fields['car_photo_path'] = car_photo
         
         storage.storage.update_user(user_id, **fields)
         storage.storage.set_active_role(user_id, 'driver')
@@ -677,6 +752,8 @@ def create_app():
     app.router.add_get('/api/state', api_state)
     app.router.add_get('/api/whoami', api_whoami)
     app.router.add_post('/api/act', api_act)
+    app.router.add_post('/api/photo', photo_upload)
+    app.router.add_get('/api/photo/{user_id}', photo_get)
     app.router.add_get('/api/people', api_people)
     # Registration endpoints
     app.router.add_post('/api/users/register', users_register)

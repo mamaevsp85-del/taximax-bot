@@ -318,6 +318,122 @@
     return '<label class="field"><span>' + label + '</span><input id="' + id + '" value="' + esc(value || "") + '" placeholder="' + esc(placeholder || "") + '"></label>';
   }
 
+  // ==================== ФОТО АВТОМОБИЛЯ (обязательно при регистрации) ====================
+  // Фото можно приложить прямо здесь: выбираем файл, сжимаем на клиенте и
+  // отправляем на /api/photo. Оно сохраняется в базе водителя и уходит
+  // администратору вместе с заявкой.
+  var _carPhoto = "";   // data-url выбранного файла (ещё не загруженного)
+
+  function photoBlock(locked) {
+    var has = !!(S && S.user && S.user.car_photo);
+    if (has) {
+      var src = (S.user.car_photo_url || "") + "?t=" + Date.now();
+      return '<div class="card"><b>📷 Фото автомобиля</b>' +
+        '<img src="' + src + '" alt="Авто" style="width:100%;border-radius:12px;margin-top:8px">' +
+        '<p class="muted">Фото прикреплено' + (locked ? " и отправлено на проверку" : "") + '.</p>' +
+        (locked ? "" : '<button class="btn ghost" data-act="pick-photo">Заменить фото</button>') +
+        '</div>';
+    }
+    if (locked) {
+      return '<div class="card"><b>📷 Фото автомобиля</b>' +
+        '<p class="note">Фото не прикреплено — админ не сможет одобрить заявку.</p>' +
+        '<button class="btn yellow" data-act="pick-photo">Прикрепить фото</button></div>';
+    }
+    var preview = _carPhoto ? '<img src="' + _carPhoto + '" alt="Авто" style="width:100%;border-radius:12px;margin-top:8px">' : "";
+    return '<div class="card"><b>📷 Фото автомобиля *</b>' +
+      '<p class="muted">Виден весь автомобиль и госномер. Без фото заявка не отправляется.</p>' +
+      preview +
+      '<input type="file" id="car_photo_file" accept="image/*" style="display:none">' +
+      '<button class="btn ghost" data-act="pick-photo">' + (preview ? "Выбрать другое" : "Выбрать фото") + '</button>' +
+      '</div>';
+  }
+
+  // Уменьшаем фото до 1280px по длинной стороне, чтобы не гнать мегабайты.
+  function readPhoto(file, cb) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      var img = new Image();
+      img.onload = function () {
+        var max = 1280;
+        var w = img.width, h = img.height;
+        if (w > max || h > max) {
+          var k = Math.min(max / w, max / h);
+          w = Math.round(w * k); h = Math.round(h * k);
+        }
+        var canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        try { cb(canvas.toDataURL("image/jpeg", 0.82)); }
+        catch (err) { cb(e.target.result); }
+      };
+      img.onerror = function () { cb(e.target.result); };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function uploadCarPhoto(dataUrl) {
+    var res = await fetch("/api/photo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: dataUrl, uid: (maxUser && maxUser.id) || 0 })
+    });
+    var data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Не удалось загрузить фото");
+    return data;
+  }
+
+  // ==================== СВОЙ ЗВУК УВЕДОМЛЕНИЯ ====================
+  // Системный звук push в MAX не настраивается. Поэтому, пока приложение
+  // открыто, играем собственный двухтональный сигнал «такси ждёт»
+  // (Web Audio API) — он отличается от обычной вибрации.
+  // Плюс дублируем вибрацией, если она доступна.
+  var _audioCtx = null;
+  var _lastAlertKey = "";
+
+  function taxiBeep() {
+    try {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return false;
+      _audioCtx = _audioCtx || new Ctx();
+      if (_audioCtx.state === "suspended") _audioCtx.resume();
+      var t = _audioCtx.currentTime;
+      // 880 → 1175 (пауза) → 1568, как в боте
+      [[880, 0.16, 0], [1175, 0.20, 0.19], [1568, 0.28, 0.44]].forEach(function (n) {
+        var osc = _audioCtx.createOscillator();
+        var gain = _audioCtx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = n[0];
+        var start = t + n[2];
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(0.35, start + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + n[1]);
+        osc.connect(gain); gain.connect(_audioCtx.destination);
+        osc.start(start); osc.stop(start + n[1] + 0.02);
+      });
+    } catch (e) { return false; }
+    try {
+      if (navigator.vibrate) navigator.vibrate([120, 80, 120, 80, 200]);
+    } catch (e) {}
+    return true;
+  }
+
+  // Один и тот же алерт не повторяем на каждом автообновлении.
+  function alertOnce(key, text) {
+    if (_lastAlertKey === key) return;
+    _lastAlertKey = key;
+    taxiBeep();
+    showBanner(text, "err");
+  }
+
+  // Сколько минут заказ ищет водителя.
+  function pendingMinutes(o) {
+    if (!o || !o.created_at) return 0;
+    var t = new Date(o.created_at).getTime();
+    if (isNaN(t)) return 0;
+    return (Date.now() - t) / 60000;
+  }
+
   var views = {
     login: function (people) {
       return "<h2>Кто вы</h2><p class=\"muted\">Это живые профили из базы бота. В MAX откроется ваш аккаунт сам.</p>" +
@@ -418,6 +534,21 @@
       var list = (S.passenger.orders || []).filter(function (o) { return ["pending", "accepted", "driver_arrived", "in_progress"].indexOf(o.status) >= 0; });
       return "<h2>Мои заказы</h2>" + (list.length ? list.map(function (o) { return orderCard(o, "open-order"); }).join("") : '<p class="list-empty">Активных заказов нет</p>');
     },
+    // Вопрос, когда водителя нет дольше 10 минут — ждать или отменить
+    "no-driver": function () {
+      var o = orderById(picked) || (S.passenger && S.passenger.active) || {};
+      var mins = Math.round(pendingMinutes(o));
+      var waiting = !!o.passenger_waiting;
+      return '<div class="onb-hero"><div class="onb-logo">⏳</div>' +
+        "<h1>Водитель пока не найден</h1>" +
+        '<p class="muted">Заказ #' + esc(o.id) + " ищет водителя уже " + mins + " мин. Как поступим?</p></div>" +
+        (waiting
+          ? '<p class="note">Вы выбрали «ждать» — продолжаем поиск. Цена может вырасти.</p>'
+          : '<div class="card"><b>🕐 Ждать ещё</b><p class="muted">Продолжим искать водителя. Мы предупредим вас.</p></div>' +
+            '<button class="btn yellow" data-act="no-driver-wait" data-id="' + esc(o.id) + '">Ждать ещё</button>') +
+        '<button class="btn danger" data-act="no-driver-cancel" data-id="' + esc(o.id) + '">Отменить заказ</button>' +
+        '<button class="btn ghost" data-act="tab" data-screen="home">На главную</button>';
+    },
     history: function () {
       var list = (S.passenger.orders || []).filter(function (o) { return ["completed", "cancelled"].indexOf(o.status) >= 0; });
       return "<h2>История заказов</h2>" + (list.length ? list.map(function (o) { return orderCard(o, "open-order"); }).join("") : '<p class="list-empty">Поездок пока нет</p>');
@@ -480,11 +611,15 @@
         '<p class="note">Поддержка: ' + esc(S.passenger.support || "—") + "</p>";
     },
     become: function () {
-      if (S.user.driver_status === "pending") return "<h2>Заявка на проверке</h2><p class=\"muted\">Админ увидит её в модерации.</p>";
+      if (S.user.driver_status === "pending") {
+        return "<h2>Заявка на проверке</h2><p class=\"muted\">Админ увидит её в модерации.</p>" +
+          photoBlock(true);
+      }
       if (S.user.driver_status === "approved") return "<h2>Вы уже водитель</h2><button class=\"btn\" data-act=\"role\" data-role=\"driver\">Открыть меню водителя</button>";
       var note = S.user.driver_status === "rejected" ? '<p class="note">Прошлая заявка отклонена: ' + esc(S.user.reject_reason || "без причины") + "</p>" : "";
       return "<h2>Анкета водителя</h2>" + note + field("car", "Марка и модель", "", "Kia Rio") +
         field("plate", "Госномер", "", "А123ВС 19") + field("color", "Цвет", "", "белый") +
+        photoBlock(false) +
         '<button class="btn" data-act="apply">Отправить на проверку</button>';
     },
     rate: function () {
@@ -654,10 +789,18 @@
     "a-driver": function () {
       var d = (S.admin.drivers || []).filter(function (x) { return String(x.user_id) === String(picked); })[0];
       if (!d) return "<h2>Водитель</h2><p class=\"muted\">Не найден.</p>";
+      var pending = d.verification_status === "pending";
+      var photo = d.car_photo
+        ? '<img src="/api/photo/' + d.user_id + '?t=' + Date.now() + '" alt="Авто" style="width:100%;border-radius:12px;margin:10px 0">'
+        : '<p class="note">Фото автомобиля не прикреплено</p>';
+      // Кнопки решения показываем ТОЛЬКО пока заявка ждёт проверки.
+      var decide = pending
+        ? '<div class="btn-row"><button class="btn" data-act="adm" data-op="admin.approve" data-id="' + d.user_id + '">Одобрить</button>' +
+          '<button class="btn danger" data-act="adm-reject" data-id="' + d.user_id + '">Отклонить</button></div>'
+        : '';
       return "<h2>" + esc(d.name) + "</h2><p class=\"muted\">" + esc(d.phone) + "<br>" + esc(d.car_model) + " " + esc(d.car_number) +
         " " + esc(d.car_color) + "<br>Баланс " + money(d.balance) + " · " + esc(d.verification_status) + "</p>" +
-        '<div class="btn-row"><button class="btn" data-act="adm" data-op="admin.approve" data-id="' + d.user_id + '">Одобрить</button>' +
-        '<button class="btn danger" data-act="adm-reject" data-id="' + d.user_id + '">Отклонить</button></div>' +
+        photo + decide +
         '<button class="btn ghost" data-act="adm" data-op="admin.unblock" data-id="' + d.user_id + '">Разблокировать</button>' +
         '<div class="btn-row"><button class="btn ghost" data-act="adm" data-op="admin.block" data-id="' + d.user_id + '" data-minutes="60">Блок 1 ч</button>' +
         '<button class="btn ghost" data-act="adm" data-op="admin.block" data-id="' + d.user_id + '">Блок навсегда</button></div>' +
@@ -671,7 +814,7 @@
     "a-moderation": function () {
       var list = S.admin.pending || [];
       return "<h2>Модерация</h2>" + (list.length ? list.map(function (d) {
-        return row(d.name, d.car_number || "без номера", "a-open", { id: d.user_id });
+        return row(d.name, (d.car_number || "без номера") + (d.car_photo ? " · 📷" : " · без фото"), "a-open", { id: d.user_id });
       }).join("") : '<p class="list-empty">Заявок нет</p>');
     },
     "a-orders": function () {
@@ -1053,6 +1196,23 @@
     },
     "open-order": function (el) { picked = Number(el.dataset.id); go("live"); },
     cancel: function (el) { run({ op: "order.cancel", id: Number(el.dataset.id) }); },
+    "no-driver-wait": function (el) {
+      // Пассажир выбрал ждать: помечаем в локальном состоянии и на сервере,
+      // чтобы авто-отмена не сработала.
+      if (S.passenger && S.passenger.active) S.passenger.active.passenger_waiting = true;
+      run({ op: "order.wait", id: Number(el.dataset.id) }).then(function () {
+        toast("Продолжаем искать водителя");
+        screen = "home";
+        render();
+      });
+    },
+    "no-driver-cancel": function (el) {
+      run({ op: "order.cancel", id: Number(el.dataset.id) }).then(function () {
+        _noDriverPrompted = {};
+        screen = "home";
+        render();
+      });
+    },
     "sheet-price-live": function (el) { sheet("<h2>Своя цена</h2>" + field("own", "Сумма", "", "220") + '<button class="btn" data-act="save-live-price" data-id="' + el.dataset.id + '">Сохранить</button>'); },
     "save-live-price": function (el) { closeSheet(); run({ op: "order.price", id: Number(el.dataset.id), price: Number(val("own")) }); },
     "sheet-complaint": function (el) { sheet("<h2>Жалоба</h2>" + field("complaint", "Что не совпало", "", "номер, цвет, водитель") + '<button class="btn" data-act="save-complaint" data-id="' + el.dataset.id + '">Отправить</button>'); },
@@ -1191,7 +1351,54 @@
         home_city: val("pcity")
       });
     },
-    apply: function () { run({ op: "driver.apply", car: val("car"), plate: val("plate"), color: val("color") }); },
+    apply: function () {
+      var car = val("car"), plate = val("plate"), color = val("color");
+      if (!car || !plate || !color) { toast("Заполните марку, номер и цвет"); return; }
+      var hasPhoto = !!(S.user && S.user.car_photo);
+      if (!hasPhoto && !_carPhoto) { toast("Прикрепите фото автомобиля"); return; }
+      var send = function () {
+        run({ op: "driver.apply", car: car, plate: plate, color: color });
+      };
+      if (_carPhoto) {
+        uploadCarPhoto(_carPhoto).then(function () {
+          _carPhoto = "";
+          send();
+        }).catch(function (e) { toast(e.message); });
+        return;
+      }
+      send();
+    },
+    "pick-photo": function () {
+      var input = document.getElementById("car_photo_file");
+      if (!input) {
+        // На экране «заявка на проверке» поля нет — создаём временное
+        input = document.createElement("input");
+        input.type = "file";
+        input.accept = "image/*";
+        input.style.display = "none";
+        document.body.appendChild(input);
+      }
+      input.onchange = function () {
+        var f = input.files && input.files[0];
+        if (!f) return;
+        readPhoto(f, function (dataUrl) {
+          _carPhoto = dataUrl;
+          if (S.user.driver_status === "pending" || S.user.driver_status === "rejected") {
+            // Дослать фото в уже поданную заявку
+            uploadCarPhoto(dataUrl).then(function () {
+              _carPhoto = "";
+              toast("Фото прикреплено");
+              refresh().catch(function () {});
+              render();
+            }).catch(function (e) { toast(e.message); });
+            return;
+          }
+          render();
+          toast("Фото выбрано — отправьте анкету");
+        });
+      };
+      input.click();
+    },
     period: function (el) { period = el.dataset.p; render(); },
     dperiod: function (el) { driverPeriod = el.dataset.p; render(); },
     line: function (el) { run({ op: "driver.line", status: el.dataset.status }); },
@@ -1541,7 +1748,42 @@
       if (cur === "completed" && o.price) {
         text = "Поездка #" + o.id + " завершена · " + money(o.price);
       }
-      showBanner(text, cur === "completed" ? "ok" : cur === "cancelled" ? "err" : "");
+      if (cur === "completed") {
+        showBanner(text, "ok");
+      } else if (cur === "cancelled") {
+        showBanner(text, "err");
+      } else {
+        // Водитель принял / прибыл / поехали — свой сигнал, не просто вибрация.
+        alertOnce(dedup, text);
+      }
+    }
+
+    checkNoDriverPrompt(orders);
+  }
+
+  // ==================== ВОДИТЕЛЬ НЕ НАЙДЕН (10 минут) ====================
+  // Дублируем логику бота: если заказ висит в pending дольше 10 минут и
+  // водителя нет — показываем «ждать или отменить» и играем свой звук.
+  var NO_DRIVER_ASK_MINUTES = 10;
+  var NO_DRIVER_REPEAT_MINUTES = 10;
+  var _noDriverPrompted = {};   // order_id -> время последнего показа
+
+  function checkNoDriverPrompt(orders) {
+    if (!S || !S.user || S.user.role !== "passenger") return;
+    for (var i = 0; i < orders.length; i++) {
+      var o = orders[i];
+      if (!o || !o.id || o.status !== "pending" || o.driver_id) continue;
+      var mins = pendingMinutes(o);
+      if (mins < NO_DRIVER_ASK_MINUTES) continue;
+      var last = _noDriverPrompted[o.id] || 0;
+      if (last && (Date.now() - last) / 60000 < NO_DRIVER_REPEAT_MINUTES) continue;
+      _noDriverPrompted[o.id] = Date.now();
+      picked = Number(o.id);
+      screen = "no-driver";
+      render();
+      taxiBeep();
+      showBanner("Водитель пока не найден — заказ #" + o.id, "err");
+      return;
     }
   }
 

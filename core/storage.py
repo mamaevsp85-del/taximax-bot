@@ -203,7 +203,7 @@ class Storage:
                     "access_expires": None, "transactions": [],
                     "favorites": [], "notifications_enabled": True,
                     "phone": None, "car_model": None, "car_number": None, "car_color": None,
-                    "car_photo_token": None, "driver_reject_reason": None,
+                    "car_photo_token": None, "car_photo_path": None, "driver_reject_reason": None,
                     "driver_application_at": None,
                     "driver_name": None, "driver_phone": None,
                     "created_at": datetime.now().isoformat(),
@@ -325,7 +325,7 @@ class Storage:
 
     def submit_driver_application(self, user_id: int, *, car_number: str = "",
                                   car_color: str = "", car_photo_token: Optional[str] = None,
-                                  car_model: str = "") -> None:
+                                  car_model: str = "", car_photo_path: Optional[str] = None) -> None:
         """Сохранить данные анкеты и отправить заявку на модерацию (status=pending).
 
         Заявка без номера авто или фото на модерацию не уходит.
@@ -336,6 +336,7 @@ class Storage:
             car_number=(car_number or "").strip() or None,
             car_color=(car_color or "").strip() or None,
             car_photo_token=car_photo_token or None,
+            car_photo_path=car_photo_path or None,
             driver_verification_status="pending",
             driver_reject_reason=None,
             driver_application_at=datetime.now().isoformat(),
@@ -348,11 +349,33 @@ class Storage:
             "car_number": u.get("car_number"),
             "car_color": u.get("car_color"),
             "car_photo_token": u.get("car_photo_token"),
+            "car_photo_path": u.get("car_photo_path"),
             "status": u.get("driver_verification_status", ""),
         }
 
     def get_reject_reason(self, user_id: int) -> str:
         return self.users.get(int(user_id), {}).get("driver_reject_reason") or ""
+
+    # --- mid уведомлений админам о заявке водителя ---
+    # После решения (одобрить/отклонить) редактируем то же сообщение,
+    # чтобы кнопки «Одобрить/Отклонить» исчезли.
+    def set_driver_notify_mid(self, user_id: int, admin_id: int, message_id: str) -> None:
+        if not message_id:
+            return
+        store = self.admin_data.setdefault("driver_notify_mids", {})
+        entry = store.setdefault(str(int(user_id)), {})
+        entry[str(int(admin_id))] = str(message_id)
+        self.save()
+
+    def get_driver_notify_mids(self, user_id: int) -> dict:
+        raw = (self.admin_data.get("driver_notify_mids") or {}).get(str(int(user_id)), {})
+        return {int(k): v for k, v in raw.items()}
+
+    def clear_driver_notify_mids(self, user_id: int) -> None:
+        store = self.admin_data.get("driver_notify_mids")
+        if store and str(int(user_id)) in store:
+            store.pop(str(int(user_id)), None)
+            self.save()
 
     def get_approved_drivers(self) -> list:
         return self.get_drivers()
@@ -376,6 +399,7 @@ class Storage:
             car_number=None,
             car_color=None,
             car_photo_token=None,
+            car_photo_path=None,
             car_model=None,
             access_expires=None,
             type=ROLE_PASSENGER,
@@ -503,6 +527,10 @@ class Storage:
                 "notified_driver_ids": [],
                 "viewed_driver_ids": [],
                 "declined_driver_ids": [],
+                # --- вопрос «ждать или отменить» когда нет водителя ---
+                "no_driver_asked_at": None,
+                "no_driver_asks": 0,
+                "passenger_waiting": False,
             }
             self.orders[oid] = order
             self.save()
@@ -736,6 +764,84 @@ class Storage:
             return None
 
     # ==================== АВТО-ОТМЕНА ТАЙМАУТ-ЗАКАЗОВ ====================
+    def get_pending_no_driver_orders(self, first_ask_minutes: int = 10,
+                                     ask_interval_minutes: int = 10) -> List[int]:
+        """Заказы, ждущие водителя дольше заданного времени и не получившие
+        свежий вопрос «ждать или отменить?».
+
+        Первый вопрос — через ``first_ask_minutes`` после создания заказа,
+        повторные — каждые ``ask_interval_minutes`` после прошлого вопроса.
+        """
+        result: List[int] = []
+        now = datetime.now()
+        with self._lock:
+            self._sync()
+            for oid, o in self.orders.items():
+                if o.get("status") != "pending" or o.get("driver_id"):
+                    continue
+                ca = o.get("created_at")
+                if not ca:
+                    continue
+                try:
+                    created = datetime.fromisoformat(ca) if isinstance(ca, str) else ca
+                except Exception:
+                    continue
+                if (now - created).total_seconds() < first_ask_minutes * 60:
+                    continue
+                last = o.get("no_driver_asked_at")
+                if last:
+                    try:
+                        lastdt = datetime.fromisoformat(last) if isinstance(last, str) else last
+                    except Exception:
+                        lastdt = None
+                    if lastdt and (now - lastdt).total_seconds() < ask_interval_minutes * 60:
+                        continue
+                result.append(int(oid))
+        return result
+
+    def mark_no_driver_asked(self, order_id: int) -> None:
+        """Отметить, что пассажиру задали вопрос «ждать или отменить?»."""
+        o = self.orders.get(int(order_id))
+        if o:
+            o["no_driver_asked_at"] = datetime.now().isoformat()
+            o["no_driver_asks"] = int(o.get("no_driver_asks", 0) or 0) + 1
+            self.save()
+
+    def set_passenger_waiting(self, order_id: int, waiting: bool) -> None:
+        """Пассажир нажал «ждать» (True) или «отменить» (False)."""
+        o = self.orders.get(int(order_id))
+        if o:
+            o["passenger_waiting"] = bool(waiting)
+            self.save()
+
+    def cancel_unanswered_no_driver(self, minutes_after_ask: int = 15) -> List[int]:
+        """Авто-отмена: вопрос «ждать/отменить» задан, но ответа нет дольше
+        ``minutes_after_ask`` минут, и пассажир не выбрал «ждать»."""
+        cancelled: List[int] = []
+        now = datetime.now()
+        with self._lock:
+            self._sync()
+            for oid, o in list(self.orders.items()):
+                if o.get("status") != "pending" or o.get("driver_id"):
+                    continue
+                if o.get("passenger_waiting"):
+                    continue
+                asked = o.get("no_driver_asked_at")
+                if not asked:
+                    continue
+                try:
+                    asked_dt = datetime.fromisoformat(asked) if isinstance(asked, str) else asked
+                except Exception:
+                    continue
+                if (now - asked_dt).total_seconds() >= minutes_after_ask * 60:
+                    o["status"] = "cancelled"
+                    o["cancelled_by"] = "no_driver_unanswered"
+                    o["cancelled_at"] = now.isoformat()
+                    cancelled.append(int(oid))
+            if cancelled:
+                self.save()
+        return cancelled
+
     def cancel_timeout_orders(self, timeout_minutes: int = 5) -> List[int]:
         """Отменяет pending-заказы старше timeout_minutes.
 
@@ -1426,6 +1532,8 @@ class Storage:
                 "car_model": u.get("car_model") or "",
                 "car_color": u.get("car_color") or "",
                 "car_number": u.get("car_number") or "",
+                "car_photo": bool(u.get("car_photo_path") or (
+                    u.get("car_photo_token") and not str(u.get("car_photo_token")).startswith("miniapp"))),
                 "status": u.get("status", "offline"),
                 "verification_status": u.get("driver_verification_status", ""),
                 "is_blocked": self.is_driver_blocked(uid),

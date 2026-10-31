@@ -64,6 +64,14 @@ class Settings(BaseSettings):
         description="Файл белого списка городов (по одному в строке). Пустой/нет файла = все города разрешены.",
     )
 
+    # --- Ссылки ---
+    # Внешний публичный адрес Mini-App (кнопка «Открыть Mini-App», фото водителей).
+    # Задаётся в .env как MINI_APP_URL. На локальном туннеле это
+    # https://pearl-aspen-b471789c.tunnl.gg — менять не нужно, если туннель тот же.
+    mini_app_url: str = Field(
+        default="", description="Публичный URL Mini-App (MINI_APP_URL env)"
+    )
+
     # --- Поведение ---
     environment: str = "development"
     debug: bool = True

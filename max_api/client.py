@@ -95,7 +95,8 @@ class MaxClient:
                            text: Optional[str] = None,
                            attachments: Optional[List[Dict[str, Any]]] = None,
                            notify: Optional[bool] = None,
-                           text_format: Optional[str] = None) -> Dict[str, Any]:
+                           text_format: Optional[str] = None,
+                           sound: Optional[str] = None) -> Dict[str, Any]:
         if user_id is None and chat_id is None:
             raise ValueError("Нужно указать user_id или chat_id")
         dialog_key = int(user_id or chat_id)
@@ -115,6 +116,12 @@ class MaxClient:
         if text_format is not None:
             # Без этого параметра MAX присылает <b> как обычный текст
             body["format"] = text_format
+        if sound is not None:
+            # Ожидаемый звук push-уведомления (если API MAX принимает).
+            # Если поле не поддерживается, MAX отвергнет запрос — тогда ниже
+            # будет ошибка MaxApiError, которую вызывающий код ловит и
+            # отправляет сообщение без `sound`.
+            body["notification"] = {"type": "message", "sound": str(sound)}
         return await self._request("POST", "/messages", params=params, json=body)
 
     async def edit_message(self, message_id: str, text: Optional[str] = None,
@@ -132,6 +139,39 @@ class MaxClient:
 
     async def delete_message(self, message_id: str) -> Dict[str, Any]:
         return await self._request("DELETE", "/messages", params={"message_id": message_id})
+
+    async def upload_file(self, filename: str, data: bytes,
+                          content_type: str = "image/jpeg") -> Dict[str, Any]:
+        """Загрузить медиафайл в MAX Bot API (POST /uploads) и получить токен вложения.
+
+        Используется Mini-App (фото авто) и фоновыми задачами (звуковой
+        сигнал «нет водителя»). Токен дальше передаётся в attachment
+        {"type": "audio"} / {"type": "image"}.
+        """
+        headers = {"Authorization": self.token}
+        try:
+            resp = await self._client.post(
+                "/uploads", headers=headers,
+                files={"file": (filename, data, content_type)},
+            )
+        except httpx.HTTPError as exc:
+            raise MaxApiError(f"Сетевая ошибка MAX API upload: {exc}") from exc
+        if resp.status_code == 401:
+            raise MaxApiError("Ошибка авторизации: токен MAX недействителен")
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {"raw": resp.text}
+        if resp.status_code >= 400:
+            raise MaxApiError(f"MAX API {resp.status_code}: {payload}")
+        # Ответ обычно {"retval": {"token": ...}} — вытаскиваем токен надёжно.
+        token = None
+        retval = payload.get("retval") if isinstance(payload, dict) else payload
+        if isinstance(retval, dict):
+            token = retval.get("token") or payload.get("token")
+        elif isinstance(payload, dict):
+            token = payload.get("token")
+        return {"ok": True, "token": token, "raw": payload}
 
     async def answer_callback(self, callback_id: str, *,
                               text: Optional[str] = None,

@@ -881,6 +881,35 @@ def register_passenger(router: Router) -> None:
 
     router.on_callback("passenger:wait_more:")(wait_more)
 
+    async def no_driver_wait(client, user_id, update, ctx):
+        """Пассажир нажал «Ждать ещё» в вопросе «водитель не найден»."""
+        try:
+            order_id = int(update.callback.payload.split(":")[-1])
+        except (AttributeError, ValueError):
+            return
+        order = S.get_order(order_id)
+        reply = _menu(client, user_id)
+        if not order or order.get("passenger_id") != user_id:
+            await reply.send("❌ Заказ не найден.",
+                             keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            return
+        if order.get("status") != "pending":
+            await reply.send(
+                f"Этот заказ уже не ищет водителя (статус: {ORDER_STATUS_NAMES.get(order.get('status'), order.get('status'))}).",
+                keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            return
+        # Пассажир выбрал ждать: снимаем авто-отмену и продолжаем поиск.
+        S.set_passenger_waiting(order_id, True)
+        await reply.send(
+            "🕐 <b>Продолжаем искать водителя</b>\n\n"
+            f"Заказ #{order_id} остаётся активным — мы предупредим вас, "
+            "как только водитель будет найден.\n\n"
+            "Цена может вырасти: водителям приходит уведомление о повышении.",
+            keyboard=[[callback_button("🚖 Статус заказа", f"passenger:order:{order_id}")],
+                      [callback_button("❌ Отменить заказ", f"passenger:cancel:{order_id}")]])
+
+    router.on_callback("passenger:no_driver_wait:")(no_driver_wait)
+
     async def cancel_wait(client, user_id, update, ctx):
         await cancel_order(client, user_id, update, ctx)
 
@@ -1326,14 +1355,17 @@ def register_passenger(router: Router) -> None:
         number = form.get("car_number") or ""
         color = form.get("car_color") or ""
         token = form.get("car_photo_token")
-        if not (number and color and token):
+        user_row = S.get_user(user_id) or {}
+        photo_path = (user_row.get("car_photo_path") or "").strip()
+        if not (number and color and (token or photo_path)):
             await reply.send(
                 "❌ Анкета заполнена не полностью. Начните заново.",
                 keyboard=[[callback_button("🚗 Заполнить анкету", "passenger:become_driver")]])
             await fsm.clear()
             return
         S.submit_driver_application(
-            user_id, car_number=number, car_color=color, car_photo_token=token)
+            user_id, car_number=number, car_color=color, car_photo_token=token,
+            car_photo_path=photo_path or None)
         await fsm.clear()
         await reply.send(
             "📨 <b>Заявка отправлена на модерацию!</b>\n\n"
@@ -1351,9 +1383,19 @@ def register_passenger(router: Router) -> None:
     # ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
     async def _notify_admins_new_driver(client, user_id, name, number="",
                                     car_color="", photo_token=None):
-        """Уведомление админам: анкета водителя с фото и кнопками решения."""
+        """Уведомление админам: анкета водителя с фото и кнопками решения.
+
+        Запоминаем mid каждого уведомления, чтобы сразу после «Одобрить» /
+        «Отклонить» отредактировать это же сообщение и убрать кнопки решения —
+        повторно нажать «Одобрить» будет невозможно.
+        """
         user = S.get_user(user_id) or {}
         phone = user.get("phone") or "—"
+        photo_path = (user.get("car_photo_path") or "").strip()
+        photo_url = ""
+        base = (getattr(settings, "mini_app_url", "") or "").rstrip("/")
+        if photo_path and base:
+            photo_url = f"{base}/api/photo/{user_id}"
         text = (
             "🚗 <b>Новая заявка на водителя!</b>\n\n"
             f"👤 {sanitize_input(name or 'Без имени')}\n"
@@ -1361,8 +1403,10 @@ def register_passenger(router: Router) -> None:
             f"📱 {sanitize_input(phone)}\n"
             f"🔢 Номер: <b>{sanitize_input(number or '—')}</b>\n"
             f"🎨 Авто: <b>{sanitize_input(car_color or '—')}</b>\n"
-            f"📷 Фото авто: {'прикреплено ниже' if photo_token else 'не прикреплено'}\n\n"
-            "Проверьте анкету и примите решение:"
+            f"📷 Фото авто: "
+            f"{'прикреплено' if (photo_token or photo_path) else 'НЕ ПРИКРЕПЛЕНО'}\n"
+            + (f"🖼 {photo_url}\n" if photo_url else "")
+            + "\nПроверьте анкету и примите решение:"
         )
         rows = [
             [callback_button("✅ Одобрить", f"a:drv:approve:{user_id}"),
@@ -1371,8 +1415,16 @@ def register_passenger(router: Router) -> None:
         ]
         for admin_id in S.get_admin_ids():
             try:
-                await Reply(client, admin_id).send(
+                result = await Reply(client, admin_id).send(
                     text, keyboard=rows, image_token=photo_token)
+                mid = None
+                try:
+                    from ui.reply import _extract_mid
+                    mid = _extract_mid(result)
+                except Exception:
+                    mid = (result or {}).get("message_id") if isinstance(result, dict) else None
+                if mid:
+                    S.set_driver_notify_mid(user_id, admin_id, mid)
             except Exception as exc:
                 logger.warning("Не удалось уведомить админа %s: %s", admin_id, exc)
 

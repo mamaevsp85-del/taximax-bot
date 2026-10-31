@@ -62,6 +62,36 @@ def _generate_user_id() -> int:
     return uid
 
 
+async def _finalize_driver_notifications(client, uid: int, status_text: str) -> None:
+    """Убрать кнопки «Одобрить/Отклонить» из уведомлений админам.
+
+    После решения по заявке редактируем то же сообщение, где админ нажимал
+    кнопку: остаётся только «Модерация». Повторно одобрить нельзя.
+    """
+    mids = {}
+    try:
+        mids = S.get_driver_notify_mids(uid)
+    except Exception:
+        mids = {}
+    for admin_id, mid in mids.items():
+        try:
+            await Reply(client, admin_id).edit(
+                mid, text=status_text,
+                keyboard=[[callback_button("🛠 Модерация", "a:moderation")]])
+        except Exception as exc:
+            logger.warning("Не удалось обновить уведомление админа %s: %s", admin_id, exc)
+            # Если MAX не дал отредактировать (например, сообщение с фото) —
+            # удаляем его, чтобы кнопки «Одобрить/Отклонить» не остались.
+            try:
+                await client.delete_message(mid)
+            except Exception as exc2:
+                logger.debug("Не удалось удалить уведомление %s: %s", mid, exc2)
+    try:
+        S.clear_driver_notify_mids(uid)
+    except Exception:
+        pass
+
+
 def register_admin(router: Router) -> None:
     # ==================== ГЛАВНОЕ МЕНЮ ====================
     async def admin_menu(client, user_id, update, ctx):
@@ -111,8 +141,9 @@ def register_admin(router: Router) -> None:
             uid = d.get("user_id")
             name = d.get("name") or str(uid)
             car = d.get("car_model") or "—"
-            lines.append(f"• {escape_html(name)} | {escape_html(car)}")
-            rows.append([callback_button(f"👤 {name} | {car}", f"a:drv:view:{uid}")])
+            photo_mark = "📷" if (d.get("car_photo_path") or d.get("car_photo_token")) else "❌без фото"
+            lines.append(f"• {escape_html(name)} | {escape_html(car)} | {photo_mark}")
+            rows.append([callback_button(f"👤 {name} | {car}"[:60], f"a:drv:view:{uid}")])
         rows.append([callback_button(BACK, "a:menu")])
         await reply.send("\n".join(lines), keyboard=rows)
 
@@ -126,6 +157,14 @@ def register_admin(router: Router) -> None:
             await reply.send("Профиль не найден.", keyboard=[[callback_button(BACK, "a:menu")]])
             return
         st = u.get("driver_verification_status", "")
+        photo_path = (u.get("car_photo_path") or "").strip()
+        photo_token = (u.get("car_photo_token") or "").strip()
+        base = (getattr(settings, "mini_app_url", "") or "").rstrip("/")
+        photo_url = f"{base}/api/photo/{uid}" if (photo_path and base) else ""
+        photo_line = (
+            f"📷 Фото: {'есть' if (photo_path or photo_token) else 'НЕТ'}"
+            + (f" — {photo_url}" if photo_url else "")
+        )
         text = (
             "👤 <b>Профиль кандидата</b>\n\n"
             f"ID: {uid}\n"
@@ -133,17 +172,20 @@ def register_admin(router: Router) -> None:
             f"Телефон: {escape_html(u.get('phone') or '—')}\n"
             f"Авто: {escape_html(u.get('car_model') or '—')} | "
             f"{escape_html(u.get('car_color') or '—')} | {escape_html(u.get('car_number') or '—')}\n"
+            f"{photo_line}\n"
             f"Верификация: {st or '—'}"
         )
         rows = []
+        # Кнопки решения — только пока заявка ждёт проверки.
         if st == "pending":
             rows.append([callback_button("✅ Одобрить", f"a:drv:approve:{uid}"),
                          callback_button("❌ Отклонить", f"a:drv:reject:{uid}")])
-        rows.append([callback_button("📝 На модерацию", f"a:drv:reverify:{uid}")])
+        else:
+            rows.append([callback_button("✅ Уже проверен", "a:noop")])
         rows.append([callback_button("🛠 Управление", f"a:drv:manage:{uid}")])
         rows.append([callback_button("🗑 Удалить", f"a:drv:delconf:{uid}")])
         rows.append([callback_button("↪️ К списку", "a:moderation")])
-        await reply.send(text, keyboard=rows)
+        await reply.send(text, keyboard=rows, image_token=photo_token or None)
 
     async def approve_driver(client, user_id, update, ctx):
         if not _is_admin(user_id):
@@ -157,6 +199,14 @@ def register_admin(router: Router) -> None:
                 keyboard=[[callback_button("🚗 Меню водителя", "role:driver")]])
         except Exception as exc:
             logger.warning("notify driver %s approve: %s", uid, exc)
+        # В уведомлении админу убираем кнопки решения
+        u = S.get_user(uid) or {}
+        await _finalize_driver_notifications(
+            client, uid,
+            "✅ <b>Заявка одобрена</b>\n\n"
+            f"👤 {escape_html(u.get('name') or '—')}\n"
+            f"🆔 {uid}\n"
+            f"🔢 {escape_html(u.get('car_number') or '—')}")
         await _Reply(client, user_id).send(
             f"✅ Водитель {uid} одобрен. Доступ открыт.",
             keyboard=[[callback_button("↪️ К списку", "a:moderation"),
@@ -1829,6 +1879,13 @@ def register_admin(router: Router) -> None:
                 "Вы можете обновить данные и подать заявку снова.")
         except Exception as exc:
             logger.warning("notify driver %s reject: %s", uid, exc)
+        u = S.get_user(uid) or {}
+        await _finalize_driver_notifications(
+            client, uid,
+            "❌ <b>Заявка отклонена</b>\n\n"
+            f"👤 {escape_html(u.get('name') or '—')}\n"
+            f"🆔 {uid}\n"
+            f"Причина: {escape_html(reason)}")
         await _Reply(client, user_id).send(
             "✅ Отказ зафиксирован и водитель уведомлён.",
             keyboard=[[callback_button("↪️ К списку", "a:moderation"),

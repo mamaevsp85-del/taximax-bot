@@ -158,6 +158,8 @@ def brief_order(o: dict) -> dict:
         "car_number": driver.get("car_number") or "",
         "car_color": driver.get("car_color") or "",
         "chat": o.get("chat") or [],
+        "passenger_waiting": bool(o.get("passenger_waiting")),
+        "no_driver_asked_at": o.get("no_driver_asked_at"),
     }
 
 
@@ -209,6 +211,9 @@ def user_card(uid: int) -> dict:
         "car_model": u.get("car_model") or "",
         "car_number": u.get("car_number") or "",
         "car_color": u.get("car_color") or "",
+        "car_photo": bool(u.get("car_photo_path") or (
+            u.get("car_photo_token") and not str(u.get("car_photo_token")).startswith("miniapp"))),
+        "car_photo_url": f"/api/photo/{uid}" if u.get("car_photo_path") else "",
         "driver_name": S.get_driver_name(uid),
         "driver_phone": S.get_driver_phone(uid),
         "balance": S.get_balance(uid),
@@ -920,6 +925,13 @@ def act(uid: int, body: dict) -> dict:
                 S.update_user(did, driver_current_order_id=None)
         stop_waiting(order["id"])
         return {"ok": True}
+    if op == "order.wait":
+        # Пассажир ответил «ждать ещё» — авто-отмена не сработает.
+        order = own_order(uid, int(body["id"]))
+        if order.get("status") != "pending":
+            raise ValueError("Заказ уже не ищет водителя")
+        S.set_passenger_waiting(order["id"], True)
+        return {"ok": True, "order": brief_order(S.get_order(order["id"]) or order)}
     if op == "order.rate":
         order = own_order(uid, int(body["id"]))
         if order.get("status") != "completed":
@@ -1007,8 +1019,22 @@ def act(uid: int, body: dict) -> dict:
         model = (body.get("car") or "").strip()
         if len(number.replace(" ", "")) < 5 or len(color) < 2 or len(model) < 2:
             raise ValueError("Нужны марка, номер и цвет")
+        # Фото авто обязательно: его присылают в чат с ботом (car_photo_token)
+        # либо загружают в Mini-App (car_photo_path через /api/photo).
+        cur = S.get_user(uid) or {}
+        has_photo = bool(
+            (cur.get("car_photo_path") or "").strip()
+            or (cur.get("car_photo_token") or "").strip()
+        )
+        photo_key = (body.get("photo") or "").strip()
+        if not has_photo and not photo_key:
+            raise ValueError("Прикрепите фото автомобиля — это обязательно для регистрации")
         S.update_user(uid, car_model=model, driver_name=S.get_passenger_name(uid) or model)
-        S.submit_driver_application(uid, car_number=number, car_color=color, car_model=model, car_photo_token="miniapp")
+        S.submit_driver_application(
+            uid, car_number=number, car_color=color, car_model=model,
+            car_photo_token=cur.get("car_photo_token"),
+            car_photo_path=cur.get("car_photo_path") or (photo_key or None),
+        )
         return {"ok": True}
     if op == "driver.line":
         must_role(uid, "driver")

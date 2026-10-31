@@ -79,6 +79,120 @@ def setup_logging() -> None:
 # === Фоновая задача: авто-повышение цен ожидания pending-заказов ===
 _auto_increase_task = None
 
+# Вопрос пассажиру, когда долго нет водителя (минуты).
+NO_DRIVER_FIRST_ASK_MIN = 10        # первый вопрос — после 10 мин ожидания
+NO_DRIVER_ASK_INTERVAL_MIN = 10     # повторный вопрос — каждые 10 мин
+NO_DRIVER_UNANSWERED_MAX_MIN = 15   # если пассажир не ответил — авто-отмена через 15 мин после вопроса
+
+
+def _no_driver_sound_wav() -> bytes:
+    """Генерирует короткий двухтональный WAV-сигнал «такси ждёт».
+
+    MAX Bot API не даёт выбрать системный звук пуша — поэтому прикрепляем
+    аудио к сообщению: на телефоне оно будет проиграно со своим звуком,
+    а не «просто вибрацией».
+    """
+    import io
+    import math
+    import struct
+    import wave
+
+    sr = 44100
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        frames = bytearray()
+
+        def tone(freq, dur, vol=0.55):
+            n = int(sr * dur)
+            out = bytearray()
+            for i in range(n):
+                # плавное начало/конец — без щелчков
+                env = min(1.0, i / (sr * 0.01), (n - i) / (sr * 0.02))
+                v = vol * 32767 * env * math.sin(2 * math.pi * freq * i / sr)
+                out += struct.pack("<h", int(v))
+            return out
+
+        # два «бипа», характерных для такси: 880 → 1175 → пауза → 1568
+        frames = (tone(880, 0.16) + tone(1175, 0.20)
+                  + tone(0, 0.18) + tone(1568, 0.28))
+        w.writeframes(bytes(frames))
+    return buf.getvalue()
+
+
+async def _send_no_driver_question(client, order) -> bool:
+    """Отправить пассажиру вопрос «Водитель не найден: ждать или отменить?»
+
+    Со звуком: окно уведомления на телефоне проиграет прикреплённый
+    аудиофайл (наш «бип»), а не обычный звук пуша. Если аудио-вложение
+    не удалось загрузить — отправляем обычное сообщение (не роняем заказ).
+    """
+    pid = order.get("passenger_id")
+    if not pid:
+        return False
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+    oid = order.get("id")
+    text = (
+        "⏳ <b>Водитель пока не найден</b> по заказу #" + str(oid) + "\n\n"
+        "Ищем уже 10 минут. Как поступим?\n\n"
+        "• <b>Ждать ещё</b> — продолжим поиск водителя\n"
+        "• <b>Отменить</b> — закроем заказ"
+    )
+    from max_api.keyboards import callback_button, keyboard_attachment
+    kb = keyboard_attachment([
+        [callback_button("🕐 Ждать ещё", f"passenger:no_driver_wait:{oid}"),
+         callback_button("❌ Отменить", f"passenger:cancel:{oid}")],
+    ])
+    attachments: list = []
+    try:
+        up = await client.upload_file("no_driver_tone.wav", _no_driver_sound_wav(),
+                                      "audio/wav")
+        token = (up or {}).get("token")
+        if token:
+            attachments.append({"type": "audio", "payload": {"token": token}})
+    except Exception as exc:
+        logger.debug("Не удалось прикрепить звук «нет водителя» #%s: %s", oid, exc)
+    attachments.extend(kb)
+    try:
+        await client.send_message(user_id=pid_int, text=text,
+                                  attachments=attachments, notify=True)
+        return True
+    except Exception as exc:
+        # Пробуем без звука (вдруг аудио-вложение не поддержано)
+        try:
+            await client.send_message(user_id=pid_int, text=text,
+                                      attachments=kb, notify=True)
+            return True
+        except Exception as exc2:
+            logger.warning("Не удалось уведомить пассажира #%s о поиске водителя: %s", oid, exc2)
+            return False
+
+
+async def _notify_order_cancelled_no_driver(client, order, reason: str) -> None:
+    """Уведомить пассажира об авто-отмене заказа без найденного водителя."""
+    pid = order.get("passenger_id")
+    if not pid:
+        return
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return
+    oid = order.get("id")
+    text = (
+        f"❌ <b>Заказ #{oid} отменён автоматически.</b>\n\n"
+        f"Водитель не нашёлся, и ваш вопрос остался без ответа ({reason}).\n"
+        "Можно создать новый заказ в любое время."
+    )
+    try:
+        await client.send_message(user_id=pid_int, text=text, notify=True)
+    except Exception as exc:
+        logger.warning("Не удалось уведомить пассажира об авто-отмене #%s: %s", oid, exc)
+
 
 async def _send_price_notification(client, order_id: int, old_price: float,
                                    new_price: float) -> None:
@@ -121,25 +235,30 @@ async def check_pending_order_auto_increase() -> None:
     try:
         while True:
             try:
-                # 1) Отменяем застарелые pending-заказы (таймаут 5 мин).
-                cancelled_ids = storage.storage.cancel_timeout_orders(timeout_minutes=5)
+                # 1) Вопрос «ждать или отменить?» для заказов без водителя.
+                no_driver_ids = storage.storage.get_pending_no_driver_orders(
+                    first_ask_minutes=NO_DRIVER_FIRST_ASK_MIN,
+                    ask_interval_minutes=NO_DRIVER_ASK_INTERVAL_MIN)
+                for oid in no_driver_ids:
+                    order = storage.storage.get_order(oid)
+                    if not order or order.get("status") != "pending":
+                        continue
+                    if await _send_no_driver_question(notif_client, order):
+                        storage.storage.mark_no_driver_asked(oid)
+                        logger.info(
+                            "Вопрос «ждать/отменить» отправлен по заказу #%s", oid)
+
+                # 1b) Если вопрос без ответа дольше допустимого — авто-отмена.
+                cancelled_ids = storage.storage.cancel_unanswered_no_driver(
+                    minutes_after_ask=NO_DRIVER_UNANSWERED_MAX_MIN)
                 for oid in cancelled_ids:
                     order = storage.storage.get_order(oid)
                     if not order:
                         continue
-                    pid = order.get("passenger_id")
-                    if pid:
-                        try:
-                            await notif_client.send_message(
-                                user_id=int(pid),
-                                text=(f"❌ Заказ #{oid} отменён автоматически: "
-                                      f"водитель не нашелся в течение 5 мин."),
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                "Не удалось уведомить пассажира об отмене #%s: %s",
-                                oid, exc)
-                    logger.info("Авто-отмена заказа #%s по таймауту", oid)
+                    await _notify_order_cancelled_no_driver(
+                        notif_client, order, "вопрос остался без ответа")
+                    logger.info(
+                        "Авто-отмена заказа #%s (нет ответа на вопрос)", oid)
 
                 # 2) Авто-повышение цены для оставшихся pending-заказов.
                 timeout_orders = storage.storage.check_order_timeout()
