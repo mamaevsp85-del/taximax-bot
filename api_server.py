@@ -72,10 +72,19 @@ async def auth_middleware(request, handler):
     if path == '/' or path.startswith('/assets/') or path.startswith('/css/') or path.startswith('/js/'):
         return await handler(request)
     # Allow public endpoints without auth
-    public_paths = ('/health', '/se14566736_bot', '/ws', '/api/state', '/api/act', '/api/people',
-                    '/api/users/register', '/api/drivers/register', '/api/admin/make-super')
-    if path in public_paths or path.startswith('/api/users/') and path.endswith('/status'):
+    public_paths = ('/health', '/se14566736_bot', '/ws', '/api/state', '/api/act', '/api/whoami')
+    if path in public_paths:
         return await handler(request)
+    # Локальная разработка: список профилей и статус пользователя открыты
+    # только на этом компьютере (аналог via_public_url в maximus_server.py).
+    # На проде эти эндпоинты доступны только по API-ключу.
+    host = (request.host or '').split(':')[0]
+    local = host in ('127.0.0.1', 'localhost', '::1')
+    if local and (path == '/api/people' or (path.startswith('/api/users/') and path.endswith('/status'))):
+        return await handler(request)
+    # /api/users/register, /api/drivers/register, /api/admin/make-super,
+    # /api/people (не локально), /api/users/*/status (не локально)
+    # — только по API-ключу (проверка ниже).
     # Allow files with extensions (static assets)
     if '.' in path.split('/')[-1] and not path.startswith('/api/'):
         return await handler(request)
@@ -83,6 +92,48 @@ async def auth_middleware(request, handler):
     if not api_key or api_key != settings.api_key:
         return web.json_response({'error': 'Unauthorized'}, status=401)
     return await handler(request)
+
+
+def _resolve_uid(request, data: dict | None = None) -> int:
+    """Определяет user_id из запроса: cookie mx -> персональный токен -> uid в query/теле.
+
+    Повторяет логику maximus_server.uid_from, чтобы Mini-App работал одинаково
+    и через 8080 (api_server), и через 8765 (maximus_server).
+    """
+    # 1) Персональный токен — он однозначно определяет пользователя
+    #    и имеет приоритет над cookie (старая cookie mx могла остаться
+    #    от прошлой сессии или от устаревшего сервера).
+    token = (request.cookies.get('maximus_token')
+             or request.headers.get('X-Maximus-Token', '')
+             or request.query.get('token', '')
+             or ((data or {}).get('token') or ''))
+    if token:
+        try:
+            resolved = storage.storage.resolve_token(str(token))
+            if resolved:
+                return int(resolved)
+        except Exception:
+            pass
+    # 2) Cookie с ID
+    try:
+        cookie = request.cookies.get('mx')
+        if cookie:
+            uid = int(cookie)
+            if uid > 0:
+                return uid
+    except (TypeError, ValueError):
+        pass
+    body = data or {}
+    for key in ('uid', 'user_id', 'max_id'):
+        raw = request.query.get(key) or body.get(key)
+        if raw:
+            try:
+                uid = int(raw)
+                if uid > 0:
+                    return uid
+            except (TypeError, ValueError):
+                continue
+    return 0
 
 
 async def health_check(request):
@@ -226,18 +277,7 @@ async def api_state(request):
     if not HAS_MAXIMUS:
         return web.json_response({'error': 'MaximusTaxi not available'}, status=503)
     try:
-        uid = 0
-        cookie = request.cookies.get('mx')
-        if cookie:
-            try:
-                uid = int(cookie)
-            except (ValueError, TypeError):
-                pass
-        if not uid:
-            try:
-                uid = int(request.query.get('uid', 0) or 0)
-            except (ValueError, TypeError):
-                uid = 0
+        uid = _resolve_uid(request)
         if not uid:
             # Return default state for anonymous users
             return web.json_response({
@@ -393,30 +433,27 @@ async def users_status(request):
 async def api_act(request):
     if not HAS_MAXIMUS:
         return web.json_response({'error': 'MaximusTaxi not available'}, status=503)
-    uid = 0
-    # Try cookie first
-    cookie = request.cookies.get('mx')
-    if cookie:
-        try:
-            uid = int(cookie)
-        except ValueError:
-            pass
     try:
         data = await request.json()
     except Exception:
         data = {}
-    # Also check body for user_id or uid
-    if not uid:
-        uid = int(data.get('user_id') or data.get('uid') or data.get('max_id') or 0)
-    if data.get('op') == 'login' and data.get('max_id'):
-        data['user_id'] = int(data['max_id'])
-        if data.get('name'):
-            storage.storage.ensure_user(int(data['user_id']), name=data['name'])
     op = data.get('op') or ''
-    if op == 'login' and not data.get('max_id') and not uid:
+    if op == 'login':
+        # Логин сам выбирает пользователя: персональный токен / max_id / user_id / cookie
+        uid = 0
+        if data.get('max_id'):
+            data['user_id'] = int(data['max_id'])
+            if data.get('name'):
+                storage.storage.ensure_user(int(data['user_id']), name=data['name'])
+    else:
+        uid = _resolve_uid(request, data)
+        if not uid:
+            try:
+                uid = int(data.get('user_id', 0) or 0)
+            except (TypeError, ValueError):
+                uid = 0
+    if op == 'login' and not data.get('max_id') and not data.get('token') and not uid:
         return web.json_response({'ok': False, 'error': 'Not authenticated'}, status=403)
-    if not uid and op != 'login':
-        uid = int(data.get('user_id', 0))
     try:
         result = act(uid, data)
         who = int(result.get('user_id') or uid or 0)
@@ -437,6 +474,12 @@ async def api_act(request):
     except Exception as exc:
         logger.exception("Act error")
         return web.json_response({'ok': False, 'error': str(exc)}, status=500)
+
+
+async def api_whoami(request):
+    """Кто подключён: uid по cookie или персональному токену (использует фронтенд)."""
+    uid = _resolve_uid(request)
+    return web.json_response({'ok': True, 'uid': uid, 'source': 'cookie' if uid else 'none'})
 
 
 async def api_people(request):
@@ -564,6 +607,13 @@ async def broadcast_update(event_type, data):
 
 
 async def webhook_handler(request):
+    # Второй барьер аутентификации вебхука (первый — секретный путь).
+    secret = getattr(settings, 'webhook_secret', None)
+    if secret:
+        got = request.headers.get('X-Webhook-Secret') or request.query.get('secret')
+        if got != secret:
+            logger.warning("Webhook: неверный секрет, запрос отклонён (путь %s)", request.path)
+            return web.json_response({'status': 'error'}, status=403)
     try:
         data = await request.json()
         upd = Update.from_dict(data)
@@ -625,6 +675,7 @@ def create_app():
     app.router.add_post('/se14566736_bot', webhook_handler)
     # Mini-App compatibility endpoints
     app.router.add_get('/api/state', api_state)
+    app.router.add_get('/api/whoami', api_whoami)
     app.router.add_post('/api/act', api_act)
     app.router.add_get('/api/people', api_people)
     # Registration endpoints

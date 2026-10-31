@@ -50,3 +50,13 @@ temp_readme.txt
 _*.py
 _*.txt
 *.tmp
+
+# Legacy standalone Mini-App (дубликат основной базы) — НЕ отслеживается в git
+MaximusTax/
+
+# Приватный ключ SSH-туннеля и инструменты
+tunnel_key
+tunnel_key.pub
+*.pem
+tools/OpenSSH-Win64/
+tools/cloudflared.exe

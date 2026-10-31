@@ -68,18 +68,9 @@ def uid_from(handler, body: dict | None = None) -> int:
     jar = SimpleCookie()
     jar.load(raw)
 
-    # 1) Cookie с ID
-    for cookie_name in ("mx", "maximus_uid"):
-        morsel = jar.get(cookie_name)
-        if morsel:
-            try:
-                uid = int(morsel.value)
-                if uid > 0:
-                    return uid
-            except ValueError:
-                pass
-
-    # 2) Персональный токен (cookie или заголовок или query)
+    # 1) Персональный токен (cookie / заголовок / query) — приоритет выше cookie,
+    #    потому что cookie mx могла остаться от прошлой сессии или от другого
+    #    сервера, а токен однозначно указывает, кто открыл приложение.
     token = ""
     morsel = jar.get("maximus_token")
     if morsel:
@@ -99,6 +90,17 @@ def uid_from(handler, body: dict | None = None) -> int:
                 return int(uid)
         except Exception:
             pass
+
+    # 2) Cookie с ID
+    for cookie_name in ("mx", "maximus_uid"):
+        morsel = jar.get(cookie_name)
+        if morsel:
+            try:
+                uid = int(morsel.value)
+                if uid > 0:
+                    return uid
+            except ValueError:
+                pass
 
     # 3) uid в query / теле — только для локальной отладки
     for key in ("uid", "user_id"):

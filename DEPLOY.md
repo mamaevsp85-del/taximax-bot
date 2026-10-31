@@ -18,14 +18,22 @@ MAX_BOT_TOKEN=your_token
 MAX_BASE_URL=https://platform-api.max.ru
 ADMIN_USER_IDS=16155678,14566736
 YANDEX_API_KEY=your_key
-SECRET_KEY=your_secret_key
-JWT_SECRET=your_jwt_secret
-SILENT_MODE=True
-API_KEY=your_api_key
 ENVIRONMENT=production
-STORAGE_BACKEND=file
+API_KEY=your_random_api_key
+WEBHOOK_SECRET=optional_webhook_secret
 STORAGE_FILE=/data/taxi_data.json
 ```
+**Какие переменные реально читает приложение** (`config.py`, pydantic-settings):
+`MAX_BOT_TOKEN`, `MAX_BASE_URL`, `ADMIN_USER_IDS`, `ADMIN_MAX_LINK`,
+`SUPPORT_CONTACT`, `YANDEX_API_KEY`, `OPENROUTESERVICE_KEY`, `STORAGE_FILE`,
+`SERVICE_AREA_FILE`, `ENVIRONMENT`, `DEBUG`, `LOG_LEVEL`, `SILENT_MODE`,
+`API_KEY`, `WEBHOOK_SECRET`.
+Переменные `SECRET_KEY`, `JWT_SECRET`, `STORAGE_BACKEND` — игнорируются
+(`extra="ignore"`), НЕ задавайте их.
+`WEBHOOK_SECRET` — если задан, webhook-приёмник `/se14566736_bot` требует
+заголовок `X-Webhook-Secret` (или `?secret=`). MAX Bot API сам подпись
+не присылает, поэтому секрет нужно прокидывать на уровне MAX/прокси или
+полагаться на секретный путь + API-ключ.
 
 ### Шаг 4: Настроить том (volume)
 1. Railway Dashboard → Settings → Volumes

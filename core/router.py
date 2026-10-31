@@ -185,11 +185,10 @@ class Router:
             return
         remember_from_update(user_id, update)  # инлайн-меню: mid сообщения с кнопкой
         mid_before = get_menu_mid(user_id)
-        logger.info("DEBUG callback user=%s payload=%s mid_before=%s", user_id, payload, mid_before)
         await fn(self.client, user_id, update, {})
         mid_after = get_menu_mid(user_id)
         if mid_after != mid_before:
-            logger.info("DEBUG callback user=%s mid changed %s -> %s", user_id, mid_before, mid_after)
+            logger.debug("callback user=%s mid changed %s -> %s", user_id, mid_before, mid_after)
 
     async def _handle_message(self, user_id: int, update: Update) -> None:
         from core.fsm import get_context

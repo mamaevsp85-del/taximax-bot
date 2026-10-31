@@ -16,7 +16,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 MAIN = ROOT / "data" / "taxi_data.json"
-OTHER = ROOT.parent / "MaximusTaxi" / "data" / "taxi_data.json"
+# Приоритет: локальная устаревшая копия MaximusTax (внутри репозитория),
+# затем внешняя папка Desktop\MaximusTaxi (ранее использовалась).
+_LOCAL_LEGACY = ROOT / "MaximusTax" / "data" / "taxi_data.json"
+_EXTERNAL_LEGACY = ROOT.parent / "MaximusTaxi" / "data" / "taxi_data.json"
+OTHER = _LOCAL_LEGACY if _LOCAL_LEGACY.exists() else _EXTERNAL_LEGACY
 
 
 def _stamp(record: dict) -> str:

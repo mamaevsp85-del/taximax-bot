@@ -48,6 +48,8 @@ python -m venv .venv
 | `ADMIN_MAX_LINK` | ссылка на аккаунт админа для кнопки «Стать водителем» |
 | `YANDEX_API_KEY` | ключ Яндекс Геокодера (адреса, обратный геокодинг) |
 | `OPENROUTESERVICE_KEY` | опционально — резервный расчёт расстояний |
+| `API_KEY` | ключ для приватных REST-эндпоинтов `api_server.py` (заголовок `X-API-Key` или `?api_key=`) |
+| `WEBHOOK_SECRET` | опционально — секрет webhook-приёмника (заголовок `X-Webhook-Secret` или `?secret=`) |
 
 ## Структура
 
@@ -90,10 +92,16 @@ python -m venv .venv
 | Что запущено | Порт | Что делает |
 |---|---|---|
 | `python main.py` | — | бот, long polling MAX API |
-| `python api_server.py` | 8080 | REST/WS API, webhook, раздача Mini App |
-| `python maximus_server.py` | 8765 | Mini App + API (`/api/state`, `/api/act`) |
+| `python api_server.py` | 8080 | REST/WS API, webhook, раздача Mini App (использует функции `maximus_server`) |
+| `python maximus_server.py` | 8765 | автономный Mini App-сервер (запасной вариант; для деплоя не нужен) |
 
-Лаунчер `../MaximusTaxi/start-max.bat` поднимает `maximus_server.py` и туннель.
+Лаунчер `../MaximusTaxi/start-max.bat` поднимает `maximus_server.py` и туннель
+(только локальная разработка).
+
+> **⚠️ `MaximusTax/` — устаревшая автономная копия Mini-App** с собственной
+> копией базы (`MaximusTax/data/`). Она исключена из git (`.gitignore`) и не
+> используется на деплое. Единственный источник правды Mini-App —
+> корневой `maximus_server.py` + `frontend/`. Правки делайте только там.
 
 
 ## Панель администратора

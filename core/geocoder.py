@@ -344,5 +344,3 @@ async def suggest_address(query: str, city: str = "", limit: int = 8,
             })
 
     return results
-
-    return total_distance, max(1, total_duration)

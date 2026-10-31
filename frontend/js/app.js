@@ -1274,6 +1274,7 @@
         setSplashRole(S.user.role);
         screen = entryScreen();
         render();
+        startKeepAlive();
         setTimeout(hideSplash, 420);
         return;
       }
@@ -1334,6 +1335,7 @@
     }
     screen = entryScreen();
     render();
+    startKeepAlive();
     setTimeout(hideSplash, 420);
   }).catch(function (err) {
     // Не смогли получить состояние — пробуем войти по любому известному uid
@@ -1365,6 +1367,7 @@
         setSplashRole(S.user.role);
         screen = entryScreen();
         render();
+        startKeepAlive();
         setTimeout(hideSplash, 420);
         return;
       }
@@ -1383,12 +1386,15 @@
   var _lastPing = 0;
 
   function keepAliveTick() {
-    if (!maxUser || !maxUser.id) return;
+    // uid берём из MAX, а если приложение открыто по персональной ссылке
+    // (token/uid в URL) — из уже загруженного состояния.
+    var uid = (maxUser && maxUser.id) || (S && S.user && S.user.id) || savedUid() || savedUidCookie();
+    if (!uid) return;
     var now = Date.now();
     // Пингуем не чаще раза в 20 секунд
     if (now - _lastPing < 20000) return;
     _lastPing = now;
-    api("/api/act", { op: "session.ping" }).catch(function () {});
+    api("/api/act", { op: "session.ping", uid: uid }).catch(function () {});
   }
 
   function startKeepAlive() {
@@ -1421,12 +1427,12 @@
   }
 
   document.addEventListener("visibilitychange", function () {
-    if (document.hidden) {
-      stopKeepAlive();
-      return;
+    // Возврат в приложение: сразу подтягиваем свежие данные.
+    // Keep-alive НЕ останавливаем — приложение не должно «засыпать».
+    if (!document.hidden) {
+      startKeepAlive();
+      softRefresh();
     }
-    startKeepAlive();
-    softRefresh();
   });
 
   window.addEventListener("focus", function () {
@@ -1434,7 +1440,8 @@
     softRefresh();
   });
 
-  window.addEventListener("blur", stopKeepAlive);
+  // Останавливаем пинг только когда страницу реально закрывают
+  window.addEventListener("pagehide", stopKeepAlive);
 
   // Обновление раз в 3 секунды на активных экранах — как было
   // ==================== УВЕДОМЛЕНИЯ ====================

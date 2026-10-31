@@ -17,8 +17,9 @@ from ui.reply import Reply
 logger = logging.getLogger(__name__)
 
 # Адрес Mini App (для локального теста - localhost, для продакшена - внешний URL)
+# При деплое на Railway/Render поставьте в .env: MINI_APP_URL=https://<ваш-домен>
 import os as _os
-MINI_APP_URL = _os.environ.get("MINI_APP_URL", "https://taximax-bot.onrender.com")
+MINI_APP_URL = _os.environ.get("MINI_APP_URL", "http://127.0.0.1:8080")
 
 
 def register_common(router: Router) -> None:

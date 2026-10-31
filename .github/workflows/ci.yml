@@ -24,6 +24,9 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pydantic pydantic-settings httpx pytest pytest-asyncio
 
-      - name: Run regression tests
+      - name: Run tests
         run: |
-          pytest tests/test_regressions.py tests/test_passenger_order.py -q
+          pytest tests -q
+        env:
+          MAX_BOT_TOKEN: "ci-placeholder-token"
+          STORAGE_FILE: /tmp/taxi_ci.json

@@ -42,9 +42,11 @@ class Settings(BaseSettings):
     support_contact: str = Field(default="developer@example.com", description="Контакт поддержки")
 
     # --- Яндекс API (геокодер + маршруты) ---
-    yandex_api_key: str = Field(
-        default="ccfbaa8f-e397-40df-a1fb-7a2449787f30", description="Yandex API key"
-    )
+    # ВАЖНО: ключ задаётся ТОЛЬКО через .env/.env.local. Дефолт пустой —
+    # реальный ключ теперь закоммичен в историю и должен быть перевыпущен
+    # в кабинете Яндекс.Геокодера. Без ключа геокодинг вернёт ошибку,
+    # а не молча упадёт с поддельным секретом из репозитория.
+    yandex_api_key: str = Field(default="", description="Yandex API key (env)" )
     yandex_geocoder_url: str = "https://geocode-maps.yandex.ru/1.x/"
     yandex_router_url: str = "https://api.routing.yandex.net/v2/route"
     # OpenRouteService (резервный расчёт расстояния). Может быть пустым.
@@ -89,8 +91,17 @@ class Settings(BaseSettings):
 
     # Silent mode - bot doesn't send menus/roles, only processes API requests
     silent_mode: bool = True
-    # API Key for authentication
-    api_key: str = Field(default="f9LHodD0cOKFnOMeRjCKold8dKcQhCpyb_ThNTfDDOGiRH9F6U8Xqu8TX0QKwiyI8Muc6VJffLERzsYFCfN6", description="API key for authentication")
+    # API Key для защиты приватных REST-эндпоинтов (headers X-API-Key или ?api_key=).
+    # ВАЖНО: задаётся ТОЛЬКО в .env. Пустой ключ = приватные эндпоинты закрыты (401).
+    # Больше НЕ используем токен MAX-бота как API-ключ.
+    api_key: str = Field(
+        default="", description="API key for private REST endpoints (env)"
+    )
+    # Опциональный секрет webhook-приёмника (заголовок X-Webhook-Secret или ?secret=).
+    # Секретный путь /se14566736_bot уже является первым барьером; секрет — второй.
+    webhook_secret: Optional[str] = Field(
+        default=None, description="Webhook secret (env, optional)"
+    )
 
 
 settings = Settings()
