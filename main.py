@@ -86,11 +86,13 @@ NO_DRIVER_UNANSWERED_MAX_MIN = 15   # если пассажир не ответ�
 
 
 def _no_driver_sound_wav() -> bytes:
-    """Генерирует короткий двухтональный WAV-сигнал «такси ждёт».
+    """Генерирует длинный громкий прерывистый WAV-сигнал «такси ждёт».
 
     MAX Bot API не даёт выбрать системный звук пуша — поэтому прикрепляем
     аудио к сообщению: на телефоне оно будет проиграно со своим звуком,
     а не «просто вибрацией».
+
+    Сигнал: 2 цикла трели такси, ~3.5 сек, громкость 90%.
     """
     import io
     import math
@@ -105,19 +107,20 @@ def _no_driver_sound_wav() -> bytes:
         w.setframerate(sr)
         frames = bytearray()
 
-        def tone(freq, dur, vol=0.55):
+        def tone(freq, dur, vol=0.9):
             n = int(sr * dur)
             out = bytearray()
             for i in range(n):
                 # плавное начало/конец — без щелчков
-                env = min(1.0, i / (sr * 0.01), (n - i) / (sr * 0.02))
+                env = min(1.0, i / (sr * 0.015), (n - i) / (sr * 0.03))
                 v = vol * 32767 * env * math.sin(2 * math.pi * freq * i / sr)
-                out += struct.pack("<h", int(v))
+                out += struct.pack("<h", int(max(-32767, min(32767, v))))
             return out
 
-        # два «бипа», характерных для такси: 880 → 1175 → пауза → 1568
-        frames = (tone(880, 0.16) + tone(1175, 0.20)
-                  + tone(0, 0.18) + tone(1568, 0.28))
+        # длинная громкая трель такси — повторена дважды, ~3.5 секунды
+        cycle = (tone(880, 0.30) + tone(1175, 0.35)
+                 + tone(0, 0.25) + tone(1568, 0.50))
+        frames = cycle + tone(0, 0.35) + cycle
         w.writeframes(bytes(frames))
     return buf.getvalue()
 

@@ -398,22 +398,24 @@
       _audioCtx = _audioCtx || new Ctx();
       if (_audioCtx.state === "suspended") _audioCtx.resume();
       var t = _audioCtx.currentTime;
-      // 880 → 1175 (пауза) → 1568, как в боте
-      [[880, 0.16, 0], [1175, 0.20, 0.19], [1568, 0.28, 0.44]].forEach(function (n) {
+      // Длинная громкая трель такси — 2 цикла, ~3.5 сек, громкость 90%.
+      // [частота, длительность, задержка от старта]
+      [[880, 0.30, 0], [1175, 0.35, 0.31], [1568, 0.50, 0.75],
+       [880, 0.30, 1.45], [1175, 0.35, 1.76], [1568, 0.60, 2.20]].forEach(function (n) {
         var osc = _audioCtx.createOscillator();
         var gain = _audioCtx.createGain();
         osc.type = "sine";
         osc.frequency.value = n[0];
         var start = t + n[2];
         gain.gain.setValueAtTime(0.0001, start);
-        gain.gain.exponentialRampToValueAtTime(0.35, start + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.9, start + 0.03);
         gain.gain.exponentialRampToValueAtTime(0.0001, start + n[1]);
         osc.connect(gain); gain.connect(_audioCtx.destination);
-        osc.start(start); osc.stop(start + n[1] + 0.02);
+        osc.start(start); osc.stop(start + n[1] + 0.03);
       });
     } catch (e) { return false; }
     try {
-      if (navigator.vibrate) navigator.vibrate([120, 80, 120, 80, 200]);
+      if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 350, 120, 250]);
     } catch (e) {}
     return true;
   }
