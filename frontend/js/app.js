@@ -410,6 +410,65 @@
     return data;
   }
 
+  // ==================== ТАЙМЕР ОЖИДАНИЯ (у водителя и пассажира) ====================
+  // Показывается, когда водитель нажал «Я прибыл». Отсчёт идёт локально
+  // каждую секунду, чтобы цифры «тикали» между опросами состояния.
+  var _waitTimer = null;
+
+  function waitingCard(o, role) {
+    var w = (o && o.waiting) || {};
+    var running = !!w.running;
+    var secs = Number(w.seconds || 0);
+    if (!running && !secs) return "";
+    var startedAt = w.started_at ? new Date(w.started_at).getTime() : 0;
+    var freeMin = Number(w.free_minutes || 3);
+    var perMin = Number(w.per_minute || 5);
+    var isFree = secs <= freeMin * 60;
+    var cost = Number(w.cost || 0);
+    var title = role === "driver"
+      ? "Пассажир садится — идёт ожидание"
+      : "Водитель ждёт вас";
+    var note = isFree
+      ? "Бесплатно ещё " + Math.max(0, Math.ceil(freeMin - secs / 60)) + " мин"
+      : "Платно: " + perMin + " ₽/мин · начислено " + Math.round(cost) + " ₽";
+    var mm = Math.floor(secs / 60);
+    return '<div class="wait-card" id="wait-card" data-started="' + (startedAt || "") +
+      '" data-free="' + freeMin + '" data-per="' + perMin + '" data-base="' + secs + '">' +
+      '<div class="wait-card-top"><b>⏳ ' + esc(title) + '</b></div>' +
+      '<div class="wait-timer" id="wait-timer">' + mm + ":" +
+      ("0" + (Math.floor(secs) % 60)).slice(-2) + '</div>' +
+      '<div class="wait-note" id="wait-note">' + esc(note) + '</div>' +
+      '</div>';
+  }
+
+  function tickWaiting() {
+    var card = document.getElementById("wait-timer");
+    var box = document.getElementById("wait-card");
+    if (!card || !box) return;
+    var started = Number(box.dataset.started || 0);
+    var base = Number(box.dataset.base || 0);
+    var freeMin = Number(box.dataset.free || 3);
+    var perMin = Number(box.dataset.per || 5);
+    var secs = started ? Math.max(0, (Date.now() - started) / 1000) : base;
+    card.textContent = Math.floor(secs / 60) + ":" +
+      ("0" + (Math.floor(secs) % 60)).slice(-2);
+    var note = document.getElementById("wait-note");
+    if (note) {
+      if (secs <= freeMin * 60) {
+        note.textContent = "Бесплатно ещё " +
+          Math.max(0, Math.ceil(freeMin - secs / 60)) + " мин";
+      } else {
+        var cost = Math.round(((secs - freeMin * 60) / 60) * perMin);
+        note.textContent = "Платно: " + perMin + " ₽/мин · начислено " + cost + " ₽";
+      }
+    }
+  }
+
+  function startWaitingTicker() {
+    if (_waitTimer) return;
+    _waitTimer = setInterval(tickWaiting, 1000);
+  }
+
   // ==================== СВОЙ ЗВУК УВЕДОМЛЕНИЯ ====================
   // Системный звук push в MAX не настраивается. Поэтому, пока приложение
   // открыто, играем собственный двухтональный сигнал «такси ждёт»
@@ -533,7 +592,11 @@
         esc([o.car_model, o.car_number, o.car_color].filter(Boolean).join(" · ")) + "<br>" + esc(o.driver_phone) + "</p>" +
         '<div class="btn-row"><button class="btn ghost" data-act="sheet-chat" data-id="' + o.id + '">Написать</button>' +
         '<button class="btn ghost" data-act="max-call" data-id="' + o.id + '" data-peer="' + esc(o.driver_id || "") + '" data-phone="' + esc(o.driver_phone) + '">📞 Позвонить через MAX</button></div></div>' : "";
+      var waitBoxP = (o.status === "driver_arrived" || o.status === "in_progress")
+        ? waitingCard(o, "passenger") : "";
+      if (waitBoxP) setTimeout(startWaitingTicker, 0);
       return '<div class="row"><h2 style="margin:0">Заказ #' + o.id + "</h2>" + badge(o.status) + "</div>" +
+        waitBoxP +
         '<div class="card"><div class="route">' + esc(o.pickup) + "<small>" + esc(o.destination) + "</small></div>" +
         '<div class="row" style="margin-top:10px"><span class="muted">' + Number(o.distance || 0).toFixed(1) +
         " км</span><b>" + money(orderPrice(o)) + "</b></div></div>" +
@@ -728,11 +791,16 @@
       if (!o) return "<h2>Текущие заказы</h2><p class=\"list-empty\">Нет активного рейса</p>";
       var actions = "";
       if (o.status === "accepted") actions = '<button class="btn" data-act="arrived" data-id="' + o.id + '">Я прибыл</button>';
-      if (o.status === "driver_arrived") actions = '<button class="btn" data-act="start-trip" data-id="' + o.id + '">Начать движение</button><button class="btn ghost" data-act="wait" data-id="' + o.id + '">Ожидание</button>';
+      // Кнопки «Ожидание» больше нет: таймер стартует автоматически при «Я прибыл».
+      if (o.status === "driver_arrived") actions = '<button class="btn" data-act="start-trip" data-id="' + o.id + '">Начать движение</button>';
       if (o.status === "in_progress") actions = '<button class="btn" data-act="complete" data-id="' + o.id + '">Завершить поездку</button>';
+      var waitBox = (o.status === "driver_arrived" || o.status === "in_progress")
+        ? waitingCard(o, "driver") : "";
+      if (waitBox) setTimeout(startWaitingTicker, 0);
       var routeEdit = '<div class="btn-row"><button class="btn ghost" data-act="sheet-live-dest" data-id="' + o.id + '">Изменить адрес</button>' +
         '<button class="btn ghost" data-act="sheet-live-stop" data-id="' + o.id + '">Добавить остановку</button></div>';
       return '<div class="row"><h2 style="margin:0">Рейс #' + o.id + "</h2>" + badge(o.status) + "</div>" +
+        waitBox +
         '<div class="card"><div class="route">' + esc(o.pickup) + "<small>" + esc(o.destination) + "</small></div>" +
         '<p class="muted">Пассажир ' + esc(o.passenger_name) + " · " + esc(o.passenger_phone) + "</p><b>" + money(o.price) + "</b></div>" +
         routeEdit +
@@ -935,9 +1003,22 @@
       }).join("") + field("aphone", "Телефон", "", "+7 900 000-00-00") + '<button class="btn" data-act="add-admin">Добавить по телефону</button>';
     },
     "a-settings": function () {
-      return "<h2>Настройки</h2><p class=\"muted\">Балансы у водителей: " + (S.admin.balances_disabled ? "скрыты" : "показаны") + "</p>" +
-        '<button class="btn" data-act="adm" data-op="admin.balances" data-hidden="' + (S.admin.balances_disabled ? "0" : "1") + '">' +
-        (S.admin.balances_disabled ? "Показать балансы" : "Скрыть балансы") + "</button>";
+      var ic = S.admin.intercity || {};
+      var freeMin = ic.free_waiting_minutes != null ? ic.free_waiting_minutes : 3;
+      var perMin = ic.waiting_price_per_minute != null ? ic.waiting_price_per_minute : 5;
+      return "<h2>Настройки</h2>" +
+        "<p class=\"muted\">Балансы у водителей: " +
+        (S.admin.balances_disabled ? "скрыты" : "показаны") + "</p>" +
+        '<button class="btn" data-act="adm" data-op="admin.balances" data-hidden="' +
+        (S.admin.balances_disabled ? "0" : "1") + '">' +
+        (S.admin.balances_disabled ? "Показать балансы" : "Скрыть балансы") + "</button>" +
+        group("Ожидание") +
+        '<div class="card"><b>⏳ Тарификация ожидания</b>' +
+        '<p class="muted">Бесплатно ' + esc(freeMin) + " мин, далее " +
+        esc(perMin) + " ₽/мин</p>" +
+        field("wfree", "Бесплатные минуты", freeMin, "3") +
+        field("wper", "Цена за минуту, ₽", perMin, "5") +
+        '<button class="btn" data-act="save-waiting">Сохранить</button></div>';
     },
     "a-commission": function () {
       var c = S.admin.commission || {};
@@ -1917,6 +1998,14 @@
     "add-manager": function () { run({ op: "admin.manager.add", id: Number(val("mid")) }); },
     "add-admin": function () { run({ op: "admin.admin.add", phone: val("aphone") }); },
     "save-content": function () { run({ op: "admin.content", passenger: val("wp"), driver: val("wd"), support: val("ws") }); },
+    "save-waiting": function () {
+      var free = Number(val("wfree"));
+      var per = Number(val("wper"));
+      if (isNaN(free) || free < 0) { toast("Бесплатные минуты: число ≥ 0"); return; }
+      if (isNaN(per) || per < 0) { toast("Цена за минуту: число ≥ 0"); return; }
+      run({ op: "admin.tariff.waiting", free_minutes: free, per_minute: per })
+        .then(function (ok) { if (ok) toast("Настройки ожидания сохранены"); });
+    },
     noop: function () {}
   };
 
@@ -2179,8 +2268,49 @@
       var who = role === "driver" ? "Пассажир" : "Водитель";
       var orderId = o.id;
       taxiBeep();
-      showBanner(who + ": " + lines.join(" "), "", function () { openDialog(orderId); });
+      // ВАЖНО: всплывающее окно сообщения не исчезает само —
+      // закрывается крестиком или открывает диалог по нажатию.
+      showMsgPopup(lines.join(" "), who + " · заказ #" + orderId,
+        function () { openDialog(orderId); });
     }
+  }
+
+  // ==================== ВСПЛЫВАЮЩЕЕ ОКНО СООБЩЕНИЯ ====================
+  // Отдельное от обычного баннера: НЕ исчезает само — только по крестику
+  // или по нажатию на само окно (тогда открывается диалог).
+  // Так водитель/пассажир не пропустит новое сообщение.
+  function showMsgPopup(text, who, onOpen) {
+    var el = document.getElementById("msg-popup");
+    if (!el) {
+      // Создаём контейнер один раз (в index.html его может не быть)
+      el = document.createElement("div");
+      el.id = "msg-popup";
+      el.className = "msg-popup";
+      el.hidden = true;
+      document.body.appendChild(el);
+    }
+    el.innerHTML =
+      '<div class="msg-popup-card" role="alertdialog">' +
+        '<div class="msg-popup-head">' +
+          '<i>💬</i><b>' + esc(who || "Новое сообщение") + '</b>' +
+          '<button type="button" class="msg-popup-close" data-popup-close="1" aria-label="Закрыть">✕</button>' +
+        '</div>' +
+        '<div class="msg-popup-text">' + esc(text) + '</div>' +
+        '<div class="msg-popup-hint">Нажмите, чтобы открыть диалог</div>' +
+      '</div>';
+    el.hidden = false;
+    el.onclick = function (e) {
+      var closer = e.target && e.target.closest && e.target.closest("[data-popup-close]");
+      if (closer) {
+        e.preventDefault();
+        e.stopPropagation();
+        el.hidden = true;
+        return;
+      }
+      // нажатие на само окно — открыть диалог
+      el.hidden = true;
+      if (typeof onOpen === "function") onOpen();
+    };
   }
 
   function showBanner(text, kind, onTap) {
@@ -2203,9 +2333,12 @@
     };
     if (window.Maximus && window.Maximus.haptic) window.Maximus.haptic("ok");
     clearTimeout(showBanner._t);
+    // Для сообщений (передан onTap) баннер не закрываем автоматически,
+    // чтобы не пропустить входящее сообщение.
+    if (typeof onTap === "function") return;
     showBanner._t = setTimeout(function () {
       el.classList.remove("show");
-    }, 6000);
+    }, 4000);
   }
 
   var _lastRoute = {};

@@ -110,6 +110,11 @@ class RegressionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(self.support.driver_main_header(10), str)
 
     async def test_waiting_preserved_and_stop_idempotent(self):
+        # Явно задаём настройки ожидания, чтобы тест не зависел от дефолтов.
+        self.s.admin_data["tariff_intercity"] = {
+            "free_waiting_minutes": 3, "waiting_price_per_minute": 5,
+        }
+        self.s.admin_data["tariffs_by_city"] = {}
         oid = self.order()
         self.s.update_order(oid, waiting_started_at=(datetime.now() - timedelta(minutes=10)).isoformat(),
                             waiting_seconds_total=60)
@@ -325,6 +330,11 @@ class RegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Куда: —", text)
 
         # Платное ожидание: старт 10 минут назад -> сумма > 0 и корректная.
+        # Настройки задаём явно (3 бесплатные минуты, 5 ₽/мин).
+        self.s.admin_data["tariff_intercity"] = {
+            "free_waiting_minutes": 3, "waiting_price_per_minute": 5,
+        }
+        self.s.admin_data["tariffs_by_city"] = {}
         started = (datetime.now() - timedelta(minutes=10)).isoformat()
         self.s.update_order(oid, waiting_started_at=started, waiting_ended_at=None,
                             status="driver_arrived")

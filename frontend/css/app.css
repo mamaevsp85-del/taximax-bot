@@ -1180,6 +1180,133 @@ select:focus {
 
 .notify-banner span { flex: 1; }
 
+/* =========================================================
+   Таймер ожидания (виден водителю и пассажиру)
+   ========================================================= */
+.wait-card {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  color: #ffffff;
+  text-align: center;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.28);
+}
+
+.wait-card-top b {
+  font-size: 13.5px;
+  font-weight: 700;
+  opacity: 0.92;
+}
+
+.wait-timer {
+  margin: 8px 0 6px;
+  font-size: 38px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.wait-note {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #facc15;
+}
+
+/* =========================================================
+   Всплывающее окно входящего сообщения (не исчезает само)
+   ========================================================= */
+.msg-popup {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 16px;
+  padding-top: calc(16px + var(--safe-t, 0px));
+  background: rgba(16, 24, 40, 0.45);
+  backdrop-filter: blur(2px);
+  animation: msg-popup-in 0.22s var(--ease, ease);
+}
+
+.msg-popup[hidden] { display: none; }
+
+@keyframes msg-popup-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.msg-popup-card {
+  width: min(440px, 100%);
+  margin-top: 6px;
+  padding: 16px 16px 14px;
+  border-radius: 20px;
+  background: #ffffff;
+  color: #101828;
+  box-shadow: 0 18px 48px rgba(16, 24, 40, 0.35);
+  cursor: pointer;
+  animation: msg-popup-card-in 0.24s var(--ease, ease);
+}
+
+@keyframes msg-popup-card-in {
+  from { transform: translateY(-14px) scale(0.98); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+.msg-popup-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 8px;
+}
+
+.msg-popup-head i {
+  font-style: normal;
+  font-size: 19px;
+  flex: none;
+}
+
+.msg-popup-head b {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.msg-popup-close {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 10px;
+  background: #eef1f6;
+  color: #475467;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.msg-popup-close:active { transform: scale(0.94); }
+
+.msg-popup-text {
+  font-size: 14.5px;
+  line-height: 1.42;
+  font-weight: 600;
+  color: #101828;
+  word-break: break-word;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.msg-popup-hint {
+  margin-top: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #667085;
+}
+
 .msg-pop {
   position: fixed;
   inset: 0;

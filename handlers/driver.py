@@ -1254,9 +1254,16 @@ async def driver_arrived(client, user_id, update, ctx):
         await _Reply(client, user_id).send("❌ Действие недоступно для этого заказа.", keyboard=back_to_main_rows())
         return
     S.update_order(oid, status="driver_arrived")
+    # «Я прибыл» сразу запускает таймер ожидания — обе стороны видят отсчёт.
+    start_waiting(oid, client=client, driver_id=user_id,
+                  passenger_id=order.get("passenger_id"))
+    wait_info = get_waiting_info(oid)
     await _Reply(client, user_id).send(
         f"🚗 <b>Заказ #{oid}</b>\n\n"
         f"Вы прибыли на точку пассажира.\n\n"
+        f"⏳ Ожидание идёт: {wait_info['waiting_time_text']}\n"
+        f"🆓 Бесплатно {int(wait_info['free_minutes'])} мин, "
+        f"далее {wait_info['per_minute']:.0f} ₽/мин\n\n"
         f"Доступные действия:",
         keyboard=order_management_rows(oid, order)
     )

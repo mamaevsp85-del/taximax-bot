@@ -14,13 +14,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from config import settings
 from core import storage
 from core.fsm import get_context
+from core.tariff_manager import get_tariff_settings, _to_number
 from max_api.keyboards import callback_button
 from ui.reply import get_menu_mid, HTML_FORMAT
 
 logger = logging.getLogger(__name__)
 S = storage.storage
 
-# Бесплатное ожидание: FREE_WAIT_MINUTES минут, затем WAIT_PER_MINUTE ₽/мин.
+# Бесплатное ожидание: значение из настроек тарифа (free_waiting_minutes),
+# здесь — только фолбэк, если настройки недоступны.
 FREE_WAIT_MINUTES = 3
 WAIT_PER_MINUTE = 5.0
 # Как часто тикер обновляет карточку водителя и проверяет переход в платное.
@@ -183,8 +185,8 @@ async def _notify_passenger_paid_waiting(order_id: int, info: Dict[str, Any]) ->
             text=(f"⏳ <b>Началось платное ожидание</b> по заказу #{order_id}\n\n"
                   f"Прошло: {info['waiting_time_text']}\n"
                   f"Начислено за ожидание: {fmt_price(info['cost'])}\n"
-                  f"Тариф: {fmt_price(WAIT_PER_MINUTE)}/мин после "
-                  f"{FREE_WAIT_MINUTES} бесплатных мин."))
+                  f"Тариф: {fmt_price(info.get('per_minute', WAIT_PER_MINUTE))}/мин после "
+                  f"{int(info.get('free_minutes', FREE_WAIT_MINUTES))} бесплатных мин."))
     except Exception as exc:
         logger.debug("Уведомление пассажиру о платном ожидании #%s: %s", order_id, exc)
 
@@ -201,6 +203,60 @@ def stop_waiting(order_id: int) -> None:
     cancel_waiting_ticker(order_id)
 
 
+def get_waiting_settings(pickup_city: str = "") -> Dict[str, Any]:
+    """Настройки ожидания из тарифов: сначала город, затем общие.
+
+    Возвращает {'free_minutes': float, 'per_minute': float}.
+
+    ВАЖНО: читаем напрямую из ``S.admin_data`` (то же хранилище, что пишет
+    админка), а не через tariff_manager — иначе в тестах и при нескольких
+    процессах значения расходятся.
+    """
+    free_default = FREE_WAIT_MINUTES
+    per_default = WAIT_PER_MINUTE
+    try:
+        admin = S.admin_data or {}
+        city_key = ""
+        try:
+            from core.service_area import normalize_city
+            city_key = normalize_city((pickup_city or "").strip())
+        except Exception:
+            city_key = (pickup_city or "").strip()
+
+        candidates: List[dict] = []
+        if city_key:
+            tariffs = admin.get("tariffs_by_city") or {}
+            own = tariffs.get(city_key)
+            if not isinstance(own, dict):
+                for key, value in tariffs.items():
+                    try:
+                        from core.service_area import normalize_city
+                        if normalize_city(str(key)) == city_key:
+                            own = value
+                            break
+                    except Exception:
+                        continue
+            if isinstance(own, dict):
+                candidates.append(own)
+        candidates.append(admin.get("tariff_intercity") or {})
+
+        for source in candidates:
+            if not isinstance(source, dict):
+                continue
+            free = source.get("free_waiting_minutes")
+            per = source.get("waiting_price_per_minute")
+            if free is not None or per is not None:
+                return {
+                    "free_minutes": max(0.0, _to_number(
+                        free if free is not None else free_default, free_default)),
+                    "per_minute": max(0.0, _to_number(
+                        per if per is not None else per_default, per_default)),
+                }
+    except Exception as exc:
+        logger.debug("Не удалось прочитать настройки ожидания: %s", exc)
+    return {"free_minutes": float(free_default), "per_minute": float(per_default)}
+
+
 def get_waiting_info(order_id: int) -> Dict[str, Any]:
     order = S.get_order(order_id) or {}
     started = order.get("waiting_started_at")
@@ -212,7 +268,10 @@ def get_waiting_info(order_id: int) -> Dict[str, Any]:
             waiting_seconds += max(0, int((datetime.now(dt.tzinfo) - dt).total_seconds()))
         except Exception:
             logger.warning("Некорректное время ожидания заказа %s", order_id)
-    free_minutes, per_minute = FREE_WAIT_MINUTES, WAIT_PER_MINUTE
+    # ВАЖНО: бесплатные минуты и цена за минуту берутся из настроек тарифа
+    # (админка: Тарифы -> Тарификация ожидания), а не из констант модуля.
+    cfg = get_waiting_settings(order.get("pickup_city") or order.get("city") or "")
+    free_minutes, per_minute = cfg["free_minutes"], cfg["per_minute"]
     free_seconds = free_minutes * 60
     if waiting_seconds <= free_seconds:
         cost, is_free = 0.0, True
@@ -224,6 +283,7 @@ def get_waiting_info(order_id: int) -> Dict[str, Any]:
     return {
         "waiting_time": m, "waiting_time_text": f"{m}:{int(waiting_seconds % 60):02d}",
         "waiting_seconds_total": waiting_seconds, "is_free": is_free,
+        "free_minutes": free_minutes, "per_minute": per_minute,
         "free_minutes_left": max(0, math.floor(free_left)), "cost": round(cost, 2),
     }
 

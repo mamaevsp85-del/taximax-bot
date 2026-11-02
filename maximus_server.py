@@ -35,6 +35,8 @@ from core.driver_support import (  # noqa: E402
     cancel_waiting_ticker,
     is_driver_busy,
     calculate_waiting_cost,
+    get_waiting_info,
+    get_waiting_settings,
 )
 from core import geocoder  # noqa: E402
 import httpx  # noqa: E402
@@ -164,6 +166,53 @@ def brief_order(o: dict) -> dict:
         "chat": o.get("chat") or [],
         "passenger_waiting": bool(o.get("passenger_waiting")),
         "no_driver_asked_at": o.get("no_driver_asked_at"),
+        "driver_arrived_at": o.get("driver_arrived_at"),
+        # --- таймер ожидания (виден и водителю, и пассажиру) ---
+        "waiting": _waiting_payload(o),
+    }
+
+
+def _waiting_payload(o: dict) -> dict:
+    """Данные таймера ожидания для карточек водителя и пассажира.
+
+    Считаем на месте (а не из кэша), чтобы Mini-App мог показывать
+    «живой» отсчёт между опросами состояния.
+    """
+    if not o:
+        return {}
+    started = o.get("waiting_started_at")
+    ended = o.get("waiting_ended_at")
+    total = int(o.get("waiting_seconds_total", 0) or 0)
+    running = bool(started and not ended)
+    if running:
+        try:
+            dt = datetime.fromisoformat(started)
+            total += max(0, int((datetime.now(dt.tzinfo) - dt).total_seconds()))
+        except Exception:
+            pass
+    try:
+        info = get_waiting_info(o.get("id"))
+    except Exception:
+        info = {}
+    free_minutes = info.get("free_minutes", get_waiting_settings(
+        o.get("pickup_city") or o.get("city") or "")["free_minutes"])
+    per_minute = info.get("per_minute", get_waiting_settings(
+        o.get("pickup_city") or o.get("city") or "")["per_minute"])
+    free_seconds = float(free_minutes) * 60.0
+    cost = float(info.get("cost") or 0)
+    if not info and total > free_seconds:
+        cost = round(((total - free_seconds) / 60.0) * float(per_minute), 2)
+    return {
+        "running": running,
+        "seconds": total,
+        "time_text": f"{total // 60}:{total % 60:02d}",
+        "free_minutes": float(free_minutes),
+        "per_minute": float(per_minute),
+        "free_left_seconds": int(max(0, free_seconds - total)),
+        "is_free": total <= free_seconds,
+        "cost": round(cost, 2),
+        "started_at": started,
+        "ended_at": ended,
     }
 
 
@@ -1303,23 +1352,35 @@ def act(uid: int, body: dict) -> dict:
         order = own_order(uid, int(body["id"]), as_driver=True)
         if order.get("status") != "accepted":
             raise ValueError("Сначала заказ должен быть принят")
-        S.update_order(order["id"], status="driver_arrived", driver_arrived_at=datetime.now().isoformat())
+        now = datetime.now().isoformat()
+        # «Прибыл» сразу включает таймер ожидания — отдельная кнопка
+        # «Ожидание» больше не нужна: отсчёт идёт у водителя и пассажира.
+        S.update_order(order["id"], status="driver_arrived", driver_arrived_at=now,
+                       waiting_started_at=now, waiting_ended_at=None,
+                       waiting_seconds_total=0)
+        fresh = S.get_order(order["id"]) or order
+        info = _waiting_payload(fresh)
         _notify_passenger(
-            S.get_order(order["id"]) or order,
+            fresh,
             f"📍 <b>Водитель прибыл</b> по заказу #{order['id']}\n\n"
             f"Машина: {(S.get_user(uid) or {}).get('car_model') or ''} "
             f"{(S.get_user(uid) or {}).get('car_number') or ''}\n\n"
-            "Первые 3 минуты ожидания бесплатно.",
+            f"⏳ Ожидание пошло. Бесплатно {int(info['free_minutes'])} мин, "
+            f"далее {info['per_minute']:.0f} ₽/мин.",
         )
-        return {"ok": True}
+        return {"ok": True, "waiting": info}
 
     if op == "driver.wait":
+        # Оставлено для совместимости: таймер уже стартует при «Прибыл».
+        # Повторное нажатие останавливает/продолжает отсчёт вручную.
         order = own_order(uid, int(body["id"]), as_driver=True)
         if order.get("waiting_started_at") and not order.get("waiting_ended_at"):
             stop_waiting(order["id"])
         else:
-            S.update_order(order["id"], waiting_started_at=datetime.now().isoformat(), waiting_ended_at=None)
-        return {"ok": True}
+            now = datetime.now().isoformat()
+            S.update_order(order["id"], waiting_started_at=now, waiting_ended_at=None)
+        fresh = S.get_order(order["id"]) or order
+        return {"ok": True, "waiting": _waiting_payload(fresh)}
 
     if op == "driver.start":
         order = own_order(uid, int(body["id"]), as_driver=True)
@@ -1466,6 +1527,38 @@ def admin_act(body: dict, actor: int | None = None) -> dict:
             raise ValueError("Укажите хотя бы одно значение тарифа")
         S.admin_data["tariff_intercity"] = current
         S.save()
+    elif op == "admin.tariff.waiting":
+        # Настройки ожидания: бесплатные минуты и цена за минуту.
+        # Значения общие (межгород-тариф) + можно задать для города.
+        city = normalize_city(body.get("city") or "")
+        target = None
+        if city:
+            tariffs = dict(S.admin_data.get("tariffs_by_city") or {})
+            key = _tariff_key(tariffs, city)
+            current = dict(tariffs.get(key) or {})
+            fields = {}
+            if body.get("free_minutes") is not None:
+                fields["free_waiting_minutes"] = max(0.0, float(body["free_minutes"]))
+            if body.get("per_minute") is not None:
+                fields["waiting_price_per_minute"] = max(0.0, float(body["per_minute"]))
+            if not fields:
+                raise ValueError("Укажите бесплатные минуты или цену за минуту")
+            current.update(fields)
+            tariffs[key] = current
+            S.admin_data["tariffs_by_city"] = tariffs
+            target = "city"
+        else:
+            current = dict(S.admin_data.get("tariff_intercity") or {})
+            if body.get("free_minutes") is not None:
+                current["free_waiting_minutes"] = max(0.0, float(body["free_minutes"]))
+            if body.get("per_minute") is not None:
+                current["waiting_price_per_minute"] = max(0.0, float(body["per_minute"]))
+            if not current:
+                raise ValueError("Укажите бесплатные минуты или цену за минуту")
+            S.admin_data["tariff_intercity"] = current
+            target = "intercity"
+        S.save()
+        logger.info("Ожидание обновлено (%s): %s", target, body)
     elif op == "admin.content":
         for key, field in (("passenger_welcome", "passenger"), ("driver_welcome", "driver"), ("support_contact", "support")):
             if body.get(field) is not None:
