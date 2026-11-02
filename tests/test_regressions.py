@@ -80,8 +80,10 @@ class RegressionTests(unittest.IsolatedAsyncioTestCase):
         self.s.ensure_user(10)
         self.s.update_user(10, driver_verification_status="approved", status="online")
         payloads = [b["payload"] for row in self.support.main_menu_rows(10) for b in row]
+        # «Сегодня» — заработок и количество заявок с переходом к списку.
         self.assertEqual(payloads, [
             "driver:work_status",
+            "driver:today",
             "driver:current_order",
             "driver:orders_available",
             "driver:location",
@@ -89,6 +91,8 @@ class RegressionTests(unittest.IsolatedAsyncioTestCase):
             "menu:roles",
         ])
         self.assertNotIn("driver:auto_loc", payloads)
+        # Баланс в главном меню водителя не показывается (работаем без комиссии).
+        self.assertNotIn("driver:balance", payloads)
 
     async def test_balance_hidden_when_commission_disabled(self):
         self.s.ensure_user(10)

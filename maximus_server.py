@@ -27,7 +27,9 @@ if BOT not in sys.path:
 from core.storage import storage as S, with_entrance  # noqa: E402
 from core.storage import get_available_orders_for_driver  # noqa: E402
 from core.service_area import normalize_city  # noqa: E402
-from core.tariff_manager import calculate_trip_price, resolve_destination_city, _is_intercity  # noqa: E402
+from core.tariff_manager import (  # noqa: E402
+    calculate_trip_price, resolve_destination_city, _is_intercity, count_waypoints,
+)
 from core.driver_support import (  # noqa: E402
     add_order_to_driver_queue,
     remove_order_from_driver_queue,
@@ -164,6 +166,7 @@ def brief_order(o: dict) -> dict:
         "car_number": driver.get("car_number") or "",
         "car_color": driver.get("car_color") or "",
         "chat": o.get("chat") or [],
+        "same_account": o.get("passenger_id") == o.get("driver_id"),
         "passenger_waiting": bool(o.get("passenger_waiting")),
         "no_driver_asked_at": o.get("no_driver_asked_at"),
         "driver_arrived_at": o.get("driver_arrived_at"),
@@ -270,6 +273,10 @@ def user_card(uid: int) -> dict:
         "driver_name": S.get_driver_name(uid),
         "driver_phone": S.get_driver_phone(uid),
         "balance": S.get_balance(uid),
+        # Показывать баланс в интерфейсе водителя имеет смысл только когда
+        # включена комиссия/платные смены. Без комиссии (бесплатный период)
+        # баланс водителю не нужен и не показывается.
+        "commission_enabled": bool(S.get_commission_config().get("enabled")),
         "balance_hidden": S.balances_disabled() and not (
             S.is_admin(uid) or S.is_manager(uid)),
         "access": S.has_active_access(uid),
@@ -330,11 +337,15 @@ def driver_block(uid: int) -> dict:
             available.append(brief_order(order))
     current = S.get_driver_active_order(uid)
     history = [brief_order(o) for o in S.get_driver_history(uid, 30)]
+    today_orders = [brief_order(o) for o in S.get_driver_history(uid, 40, period="today")]
     tariffs = S.get_access_tariffs()
+    today_stats = S.get_driver_stats(uid, "today")
     return {
         "available": available,
         "current": brief_order(current) if current else None,
         "history": history,
+        "today_orders": today_orders,
+        "today": today_stats,
         "stats": {p: S.get_driver_period_stats(uid, p) for p in ("day", "week", "month", "all")},
         "transactions": S.get_transaction_history(uid, 12),
         "tariffs": {str(k): v for k, v in tariffs.items()},
@@ -343,12 +354,23 @@ def driver_block(uid: int) -> dict:
 
 
 def admin_block() -> dict:
+    from core.tariff_manager import _default_intercity_tariff, _default_tariff
     drivers = S.get_all_drivers()
     for d in drivers:
         d["user_id"] = int(d["user_id"])
     passengers = S.get_all_passengers()
     orders = [brief_order(o) for o in S.get_orders(limit=40)]
     cities = sorted({(o.get("pickup_city") or "без города") for o in S.orders.values()})
+    # Отдаём тарифы С дефолтами: иначе в админке пусто и не видно
+    # текущих наценок (день/ночь, точка по пути), пока их не сохранили.
+    intercity = dict(_default_intercity_tariff())
+    intercity.update({k: v for k, v in (S.admin_data.get("tariff_intercity") or {}).items()
+                      if v is not None})
+    city_tariffs = {}
+    for key, value in (S.admin_data.get("tariffs_by_city") or {}).items():
+        merged = dict(_default_tariff())
+        merged.update({k: v for k, v in (value or {}).items() if v is not None})
+        city_tariffs[key] = merged
     return {
         "drivers": drivers,
         "pending": [d for d in drivers if d.get("verification_status") == "pending"],
@@ -357,8 +379,8 @@ def admin_block() -> dict:
         "cities": cities,
         "commission": S.get_commission_config(),
         "balances_disabled": S.balances_disabled(),
-        "tariffs": S.admin_data.get("tariffs_by_city") or {},
-        "intercity": S.admin_data.get("tariff_intercity") or {},
+        "tariffs": city_tariffs,
+        "intercity": intercity,
         "welcome_passenger": S.admin_data.get("passenger_welcome") or "",
         "welcome_driver": S.admin_data.get("driver_welcome") or "",
         "support": S.admin_data.get("support_contact") or "",
@@ -494,8 +516,10 @@ def quote(pickup: str, dest: str, stop: str = "",
         if dist is None:
             raise ValueError("Не удалось построить маршрут")
 
-        price = calculate_trip_price(dist, minutes, pickup_city=city1,
-                                     destination_city=dest_city)
+        price = calculate_trip_price(
+            dist, minutes, pickup_city=city1, destination_city=dest_city,
+            waypoints_count=count_waypoints(wps),
+        )
         return {
             "pickup": pickup, "destination": dest, "stop": stop,
             "pickup_city": city1, "destination_city": dest_city,
@@ -703,8 +727,12 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def _favorite_draft(uid: int, index: int) -> dict:
-    """Маршрут из избранного для экрана подтверждения, без создания заказа."""
+    """Маршрут из избранного для экрана подтверждения, без создания заказа.
+
+    Цену всегда пересчитываем по актуальному тарифу (тарифы могли измениться).
+    """
     route = S.favorite_route(uid, index)
+    wps = route.get("waypoints") or []
     draft = {
         "pickup": route["pickup"],
         "destination": route["destination"],
@@ -714,34 +742,51 @@ def _favorite_draft(uid: int, index: int) -> dict:
         "destination_coords": route["destination_coords"],
         "pickup_city": route["pickup_city"],
         "destination_city": route["destination_city"],
-        "waypoints": route["waypoints"],
+        "waypoints": wps,
         "km": route["km"],
         "minutes": route["minutes"],
         "price": route["price"],
         "step": 3,
     }
-    # Цена пересчитывается по уже известному километражу, без повторного
-    # поиска адресов. Геокодер нужен только если координат ещё нет.
-    if route.get("pickup_coords") and route.get("destination_coords") and route.get("km"):
-        draft["price"] = calculate_trip_price(
-            float(route["km"]), int(route.get("minutes") or 0),
-            pickup_city=route.get("pickup_city") or "",
-            destination_city=route.get("destination_city") or "",
-        )
-        draft["is_intercity"] = _is_intercity(route.get("pickup_city"), route.get("destination_city"))
-        return draft
+    # Полный пересчёт через геокодер/маршрут — актуальные км и тариф.
+    stop_text = ""
+    if wps:
+        first = wps[0]
+        if isinstance(first, dict):
+            stop_text = str(first.get("text") or first.get("address") or "")
+        else:
+            stop_text = str(first or "")
     try:
         fresh = quote(
-            route["pickup"], route["destination"],
+            route["pickup"], route["destination"], stop=stop_text,
             pickup_coords=route.get("pickup_coords"),
             dest_coords=route.get("destination_coords"),
         )
+        # Если в избранном больше одной остановки — сохраняем их и
+        # пересчитываем цену с полной наценкой за каждую точку.
+        if len(wps) > 1:
+            fresh["waypoints"] = wps
+            fresh["price"] = calculate_trip_price(
+                float(fresh.get("km") or 0), int(fresh.get("minutes") or 0),
+                pickup_city=fresh.get("pickup_city") or "",
+                destination_city=fresh.get("destination_city") or "",
+                waypoints_count=count_waypoints(wps),
+            )
         fresh["entrance"] = route["entrance"]
         fresh["label"] = route["label"]
         fresh["step"] = 3
         return fresh
     except Exception:
-        return draft
+        pass
+    # Фолбэк: пересчёт только по тарифу (без повторного геокодинга).
+    draft["price"] = calculate_trip_price(
+        float(route.get("km") or 0), int(route.get("minutes") or 0),
+        pickup_city=route.get("pickup_city") or "",
+        destination_city=route.get("destination_city") or "",
+        waypoints_count=count_waypoints(wps),
+    )
+    draft["is_intercity"] = _is_intercity(route.get("pickup_city"), route.get("destination_city"))
+    return draft
 
 
 def create_order(uid: int, draft: dict, price=None) -> dict:
@@ -791,7 +836,7 @@ def accept(uid: int, oid: int) -> dict:
         raise ValueError("Профиль водителя ещё не одобрен")
     if (S.get_user(uid) or {}).get("status") != "online":
         raise ValueError("Сначала выйдите на линию")
-    if not S.has_active_access(uid):
+    if S.commission_requires_access() and not S.has_active_access(uid):
         raise ValueError("Нет активной смены")
     if S.is_driver_blocked(uid) or is_driver_busy(uid):
         raise ValueError("Сейчас нельзя взять заказ")
@@ -848,6 +893,7 @@ def complete(uid: int, oid: int, lat: float | None = None, lon: float | None = N
         new_distance, new_duration,
         pickup_city=order.get("pickup_city"),
         destination_city=city or order.get("destination_city"),
+        waypoints_count=count_waypoints(order.get("waypoints")),
     )
     update_fields = {
         "destination": address or order.get("destination") or "",
@@ -1182,7 +1228,13 @@ def act(uid: int, body: dict) -> dict:
         _send_call_card(uid, int(peer), name, phone, who)
         return {"ok": True, "bot_link": _bot_link()}
     if op == "order.chat":
-        order = S.get_order(int(body["id"]))
+        try:
+            oid = int(body.get("id") or 0)
+        except (TypeError, ValueError):
+            oid = 0
+        if not oid:
+            raise ValueError("Не указан заказ")
+        order = S.get_order(oid)
         if not order or uid not in (order.get("passenger_id"), order.get("driver_id")):
             raise ValueError("Нет доступа к переписке")
         text = (body.get("text") or "").strip()
@@ -1249,6 +1301,16 @@ def act(uid: int, body: dict) -> dict:
     if op == "favorite.use":
         draft = _favorite_draft(uid, int(body.get("index") or 0))
         return {"ok": True, "order": create_order(uid, draft)}
+    if op == "favorite.remove":
+        idx = int(body.get("index") if body.get("index") is not None else -1)
+        if idx < 0:
+            oid = int(body.get("id") or 0)
+            ok = S.remove_favorite(uid, oid) if oid else False
+        else:
+            ok = S.remove_favorite_at(uid, idx)
+        if not ok:
+            raise ValueError("Избранное не найдено")
+        return {"ok": True}
     if op == "driver.apply":
         number = (body.get("plate") or "").strip()
         color = (body.get("color") or "").strip()
@@ -1279,7 +1341,7 @@ def act(uid: int, body: dict) -> dict:
             raise ValueError("Неизвестный статус")
         if S.is_driver_blocked(uid):
             raise ValueError("Профиль временно заблокирован")
-        if status == "online" and not S.has_active_access(uid):
+        if status == "online" and S.commission_requires_access() and not S.has_active_access(uid):
             raise ValueError("Нет активной смены")
         S.set_online_status(uid, status)
         return {"ok": True}
@@ -1371,19 +1433,37 @@ def act(uid: int, body: dict) -> dict:
         return {"ok": True, "waiting": info}
 
     if op == "driver.wait":
-        # Оставлено для совместимости: таймер уже стартует при «Прибыл».
-        # Повторное нажатие останавливает/продолжает отсчёт вручную.
+        # Кнопка «Ожидание» в пути: только старт/стоп таймера.
+        # СТАТУС ЗАКАЗА НЕ МЕНЯЕТСЯ НИКОГДА — иначе в интерфейсе
+        # «Завершить поездку» превращается в «Начать движение».
         order = own_order(uid, int(body["id"]), as_driver=True)
-        if order.get("waiting_started_at") and not order.get("waiting_ended_at"):
+        status_before = order.get("status")
+        if status_before not in ("in_progress", "driver_arrived"):
+            raise ValueError("Ожидание доступно только во время поездки")
+
+        running = bool(order.get("waiting_started_at") and not order.get("waiting_ended_at"))
+        if running:
             stop_waiting(order["id"])
         else:
             now = datetime.now().isoformat()
             S.update_order(order["id"], waiting_started_at=now, waiting_ended_at=None)
+
         fresh = S.get_order(order["id"]) or order
-        return {"ok": True, "waiting": _waiting_payload(fresh)}
+        # Защита: если по какой-то причине статус «съехал» — возвращаем.
+        if fresh.get("status") != status_before:
+            S.update_order(order["id"], status=status_before)
+            fresh = S.get_order(order["id"]) or fresh
+        return {"ok": True, "waiting": _waiting_payload(fresh),
+                "order": brief_order(fresh)}
 
     if op == "driver.start":
         order = own_order(uid, int(body["id"]), as_driver=True)
+        # Идемпотентность: если поездка уже идёт — НЕ трогаем ожидание
+        # и НЕ сбрасываем статус. Иначе повторное нажатие «Начать движение»
+        # (например, со старой кэшированной версией интерфейса) останавливает
+        # платное ожидание.
+        if order.get("status") == "in_progress":
+            return {"ok": True, "already": True, "order": brief_order(order)}
         if order.get("status") not in ("accepted", "driver_arrived"):
             raise ValueError("Поездку сейчас нельзя начать")
         stop_waiting(order["id"])
@@ -1427,6 +1507,8 @@ def act(uid: int, body: dict) -> dict:
 _TARIFF_FIELDS = (
     "base_price", "included_km", "price_per_km", "price_per_minute",
     "min_price", "rounding_step", "free_waiting_minutes", "waiting_price_per_minute",
+    "day_surcharge_percent", "night_surcharge_percent",
+    "night_start_hour", "night_end_hour", "waypoint_surcharge",
 )
 
 

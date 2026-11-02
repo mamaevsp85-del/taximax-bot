@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from aiohttp import web, WSMsgType
 
@@ -21,6 +23,30 @@ logger = logging.getLogger("api_server")
 
 
 storage.storage = storage.Storage()
+
+
+def _rebind_storage() -> None:
+    """Свести модульные ссылки ``S`` к одному объекту хранилища.
+
+    ВАЖНО: ``core/driver_support.py`` и ``handlers/*`` хранят СВОЮ переменную
+    ``S = storage.storage``, вычисленную при импорте. Здесь мы заменяем
+    ``storage.storage`` новым объектом — и без перепривязки они продолжают
+    указывать на старый. Тогда stop_waiting() пишет в один объект, а
+    состояние читается из другого: «Ожидание» не останавливается,
+    а статус заказа выглядит устаревшим.
+    """
+    import importlib
+    for name in ("core.driver_support", "core.tariff_manager",
+                 "handlers.driver", "handlers.passenger_new", "handlers.admin"):
+        try:
+            mod = importlib.import_module(name)
+            if hasattr(mod, "S"):
+                mod.S = storage.storage
+        except Exception as exc:  # модуль может быть ещё не импортирован
+            logger.debug("rebind %s: %s", name, exc)
+
+
+_rebind_storage()
 # Try to import MaximusTaxi server functions
 try:
     import maximus_server
@@ -73,7 +99,7 @@ async def auth_middleware(request, handler):
         return await handler(request)
     # Allow public endpoints without auth
     public_paths = ('/health', '/se14566736_bot', '/ws', '/api/state', '/api/act', '/api/whoami',
-                    '/api/photo', '/api/chat/updates')
+                    '/api/photo', '/api/chat/updates', '/api/version')
     if path in public_paths or path.startswith('/api/photo/'):
         return await handler(request)
     # Локальная разработка: список профилей и статус пользователя открыты
@@ -748,6 +774,10 @@ async def chat_updates(request):
                     'from': sender_int,
                     'text': m.get('text') or '',
                     'at': when,
+                    # Если пассажир и водитель — один аккаунт (тест на одном
+                    # телефоне), клиент НЕ должен отфильтровывать сообщение
+                    # как «своё», иначе уведомление не покажется никогда.
+                    'same_account': order.get('passenger_id') == order.get('driver_id'),
                 })
         messages.sort(key=lambda x: x.get('at') or '')
         return web.json_response({'ok': True, 'messages': messages[-30:],
@@ -756,6 +786,32 @@ async def chat_updates(request):
         logger.exception("Chat updates error")
         return web.json_response({'ok': False, 'error': str(exc),
                                   'messages': []}, status=500)
+
+
+def _static_build() -> str:
+    """Короткий хэш версии статики (по mtime app.js/app.css/index.html).
+
+    Используется и в /api/version, и для подстановки ?v=... в index.html,
+    чтобы после обновления кода телефон гарантированно взял новый файл.
+    """
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frontend')
+    parts = []
+    for rel in ('js/app.js', 'css/app.css', 'index.html'):
+        path = os.path.join(base, rel.replace('/', os.sep))
+        try:
+            parts.append(str(int(os.path.getmtime(path))))
+        except OSError:
+            parts.append('0')
+    return hashlib.md5('|'.join(parts).encode()).hexdigest()[:10]
+
+
+async def api_version(request):
+    """Версия статики: клиент сравнивает и перезагружается при обновлении."""
+    try:
+        return web.json_response({'ok': True, 'build': _static_build()})
+    except Exception as exc:
+        logger.warning('version error: %s', exc)
+        return web.json_response({'ok': False, 'build': ''})
 
 
 async def serve_frontend(request):
@@ -786,6 +842,17 @@ async def serve_frontend(request):
         content_type = content_types.get(ext, 'application/octet-stream')
         with open(file_path, 'rb') as f:
             data = f.read()
+        # Подставляем актуальный build в ?v=... для HTML: WebView в MAX
+        # агрессивно кэширует app.js, и правки не доходили до телефона
+        # (в логах: телефон грузил app.js?v=22 при актуальном 34).
+        if ext == '.html':
+            try:
+                build = _static_build()
+                text = data.decode('utf-8')
+                text = re.sub(r'\?v=[0-9A-Za-z]+', '?v=' + build, text)
+                data = text.encode('utf-8')
+            except Exception:
+                pass
         resp = web.Response(body=data, content_type=content_type, charset='utf-8')
         # НЕ кэшируем: иначе после обновления кода в приложении остаётся
         # старая версия app.js/app.css и правки «не приходят».
@@ -819,6 +886,7 @@ def create_app():
     app.router.add_post('/api/photo', photo_upload)
     app.router.add_get('/api/photo/{user_id}', photo_get)
     app.router.add_get('/api/chat/updates', chat_updates)
+    app.router.add_get('/api/version', api_version)
     app.router.add_get('/api/people', api_people)
     # Registration endpoints
     app.router.add_post('/api/users/register', users_register)

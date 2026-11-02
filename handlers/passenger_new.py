@@ -27,6 +27,7 @@ from core.fsm import get_context
 from core import geocoder
 from core.tariff_manager import (
     calculate_trip_price,
+    count_waypoints,
     is_intercity,
     resolve_destination_city,
 )
@@ -208,9 +209,9 @@ def register_passenger(router: Router) -> None:
         fsm = get_context(user_id)
         await fsm.set_state("passenger:register_name")
         await _ask(client, user_id).send(
-            "✍️ <b>Заполнение профиля</b>\n\n"
-            "Введите ваше имя (например: Иван):",
-            keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            "✍️ <b>Регистрация</b>\n\n"
+            "Чтобы пользоваться такси, укажите имя и телефон — один раз при первом входе.\n\n"
+            "Введите ваше имя (например: Иван):")
 
     router.on_callback("passenger:register")(ask_profile)
 
@@ -218,16 +219,14 @@ def register_passenger(router: Router) -> None:
         fsm = get_context(user_id)
         name = sanitize_input(update.message.text) if update.message else ""
         if not name:
-            await _ask(client, user_id).send("Имя не может быть пустым. Попробуйте снова.",
-                                             keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            await _ask(client, user_id).send("Имя не может быть пустым. Попробуйте снова.")
             return
         S.update_user(user_id, name=sanitize_input(name))
         await fsm.set_state("passenger:register_phone")
         await _ask(client, user_id).send(
             f"✅ Имя сохранено: <b>{sanitize_input(name)}</b>\n\n"
             "Теперь отправьте номер телефона кнопкой ниже:",
-            keyboard=[[request_contact_button("📱 Отправить мой номер")],
-                      [callback_button("↪️ Меню", "passenger:menu")]])
+            keyboard=[[request_contact_button("📱 Отправить мой номер")]])
 
     router.on_state("passenger:register_name")(register_name)
 
@@ -486,9 +485,12 @@ def register_passenger(router: Router) -> None:
             hop = _hop_km(pickup_coords.get("lat"), pickup_coords.get("lon"), lat, lon)
         dest_city = resolve_destination_city(
             data.get("pickup_city"), city, addr, distance_km=hop)
-        price = calculate_trip_price(distance, duration,
-                                     pickup_city=data.get("pickup_city"),
-                                     destination_city=dest_city)
+        price = calculate_trip_price(
+            distance, duration,
+            pickup_city=data.get("pickup_city"),
+            destination_city=dest_city,
+            waypoints_count=count_waypoints(wps),
+        )
         intercity = is_intercity(data.get("pickup_city"), dest_city)
         await fsm.update_data(destination=addr, destination_city=dest_city,
                               destination_coords={"lat": lat, "lon": lon},
@@ -1158,10 +1160,14 @@ def register_passenger(router: Router) -> None:
                 dest_coords.get("lat"), dest_coords.get("lon"),
                 waypoints=wp_coords)
             if dist is not None:
-                price = calculate_trip_price(dist, dur,
-                                             pickup_city=data.get("pickup_city"),
-                                             destination_city=data.get("destination_city"))
-                await fsm.update_data(distance=dist, time_minutes=dur, price=price)
+                price = calculate_trip_price(
+                    dist, dur,
+                    pickup_city=data.get("pickup_city"),
+                    destination_city=data.get("destination_city"),
+                    waypoints_count=count_waypoints(waypoints),
+                )
+                await fsm.update_data(distance=dist, time_minutes=dur, price=price,
+                                      calc_price=price)
                 await reply.send(
                     f"✅ Остановка добавлена: {addr}\n"
                     f"📏 Новое расстояние: {dist:.1f} км, время: ~{dur} мин\n"
@@ -1193,12 +1199,31 @@ def register_passenger(router: Router) -> None:
             lines.append(f"{i+1}. {label}")
             rows.append([callback_button(f"🚖 {label[:42]}",
                                          f"passenger:favorite_use:{i}")])
-            rows.append([callback_button(f"✏️ Изменить {i + 1}",
-                                         f"passenger:favorite_edit:{i}")])
+            rows.append([
+                callback_button(f"✏️ Изменить", f"passenger:favorite_edit:{i}"),
+                callback_button(f"🗑 Удалить", f"passenger:favorite_del:{i}"),
+            ])
         rows.append([callback_button("↪️ Меню", "passenger:menu")])
         await reply.send("\n".join(lines), keyboard=rows)
 
     router.on_callback("passenger:favorites")(favorites)
+
+    async def favorite_delete(client, user_id, update, ctx):
+        reply = _menu(client, user_id)
+        try:
+            idx = int(update.callback.payload.split(":")[-1])
+        except (AttributeError, ValueError):
+            await reply.send("❌ Ошибка.", keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            return
+        if S.remove_favorite_at(user_id, idx):
+            await reply.send("🗑 Маршрут удалён из избранного.",
+                             keyboard=[[callback_button("⭐ Избранное", "passenger:favorites")],
+                                       [callback_button("↪️ Меню", "passenger:menu")]])
+        else:
+            await reply.send("❌ Не удалось удалить.",
+                             keyboard=[[callback_button("⭐ Избранное", "passenger:favorites")]])
+
+    router.on_callback("passenger:favorite_del:")(favorite_delete)
 
     # --- добавить заказ в избранное ---
     async def favorite_add(client, user_id, update, ctx):
@@ -1232,6 +1257,43 @@ def register_passenger(router: Router) -> None:
     # Алиас для кнопки из уведомления о завершении поездки
     router.on_callback("passenger:fav_add:")(favorite_add)
 
+    async def _recalc_favorite_route(route: dict) -> dict:
+        """Всегда пересчитывает цену избранного по актуальному тарифу."""
+        src = route.get("src") or {}
+        wps = route.get("waypoints") or src.get("waypoints") or []
+        km = float(route.get("km") or 0)
+        minutes = int(route.get("minutes") or 0)
+        pickup_coords = route.get("pickup_coords")
+        dest_coords = route.get("destination_coords")
+        # Если есть координаты — перестраиваем маршрут (км/время могли устареть).
+        if isinstance(pickup_coords, dict) and isinstance(dest_coords, dict):
+            plat = pickup_coords.get("lat")
+            plon = pickup_coords.get("lon")
+            dlat = dest_coords.get("lat")
+            dlon = dest_coords.get("lon")
+            if plat is not None and dlat is not None:
+                wp_coords = []
+                for w in wps:
+                    if isinstance(w, dict) and w.get("lat") is not None:
+                        wp_coords.append((float(w["lat"]), float(w["lon"])))
+                dist, dur = await geocoder.calculate_distance_and_time(
+                    float(plat), float(plon), float(dlat), float(dlon),
+                    waypoints=wp_coords)
+                if dist is not None:
+                    km, minutes = float(dist), int(dur or 0)
+        price = calculate_trip_price(
+            km, minutes,
+            pickup_city=route.get("pickup_city"),
+            destination_city=route.get("destination_city"),
+            waypoints_count=count_waypoints(wps),
+        )
+        out = dict(route)
+        out["km"] = km
+        out["minutes"] = minutes
+        out["price"] = price
+        out["waypoints"] = wps
+        return out
+
     # --- создать заказ из избранного ---
     async def favorite_use(client, user_id, update, ctx):
         reply = _menu(client, user_id)
@@ -1246,17 +1308,23 @@ def register_passenger(router: Router) -> None:
                              keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
             return
         try:
-            route = S.favorite_route(user_id, idx)
+            route = await _recalc_favorite_route(S.favorite_route(user_id, idx))
         except ValueError as exc:
             await reply.send(f"❌ {exc}",
                              keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
             return
         pickup = storage.with_entrance(route["pickup"], route["entrance"])
+        stops = count_waypoints(route.get("waypoints"))
+        stop_line = f"\n⏸ Остановок: {stops}" if stops else ""
         await reply.send(
             "📋 <b>Подтверждение заказа</b>\n\n"
             f"📍 {pickup}\n"
-            f"🎯 {route['destination']}\n\n"
-            f"💰 {route['price'] or 0} руб.",
+            f"🎯 {route['destination']}"
+            f"{stop_line}\n"
+            f"📏 {float(route.get('km') or 0):.1f} км · "
+            f"⏱ ~{int(route.get('minutes') or 0)} мин\n\n"
+            f"💰 <b>{route['price'] or 0} руб.</b>\n"
+            "<i>Цена пересчитана по текущему тарифу</i>",
             keyboard=[[callback_button("👍 Подтвердить заказ",
                                        f"passenger:favorite_confirm:{idx}")],
                       [callback_button("↪️ Меню", "passenger:menu")]])
@@ -1274,12 +1342,11 @@ def register_passenger(router: Router) -> None:
                              keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
             return
         try:
-            route = S.favorite_route(user_id, idx)
+            route = await _recalc_favorite_route(S.favorite_route(user_id, idx))
         except ValueError as exc:
             await reply.send(f"❌ {exc}",
                              keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
             return
-        src = route["src"] or {}
         new_oid = S.create_order({
             "passenger_id": user_id,
             "pickup": storage.with_entrance(route["pickup"], route["entrance"]),
@@ -1293,7 +1360,7 @@ def register_passenger(router: Router) -> None:
             "base_price": route["price"] or 0,
             "pickup_city": route["pickup_city"],
             "destination_city": route["destination_city"],
-            "waypoints": route["waypoints"] or src.get("waypoints") or [],
+            "waypoints": route.get("waypoints") or [],
             "status": "pending",
             "created_at": datetime.now().isoformat(),
         })

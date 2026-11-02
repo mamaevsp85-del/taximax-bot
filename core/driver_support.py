@@ -191,15 +191,32 @@ async def _notify_passenger_paid_waiting(order_id: int, info: Dict[str, Any]) ->
         logger.debug("Уведомление пассажиру о платном ожидании #%s: %s", order_id, exc)
 
 
+def _store():
+    """Объект хранилища, с которым работает модуль.
+
+    Возвращаем модульную ссылку ``S``: api_server при старте сводит её
+    к общему синглтону (см. _rebind_storage), поэтому S всегда актуален.
+    Если S не задан — берём общий синглтон.
+    """
+    if S is not None:
+        return S
+    try:
+        from core import storage as _storage_mod
+        return getattr(_storage_mod, "storage", None)
+    except Exception:
+        return None
+
+
 def stop_waiting(order_id: int) -> None:
-    order = S.get_order(order_id)
+    store = _store()
+    order = store.get_order(order_id)
     if not order:
         return
     info = get_waiting_info(order_id)
     total = info["waiting_seconds_total"]
     now = datetime.now().isoformat()
-    S.update_order(order_id, waiting_started_at=None, waiting_ended_at=now,
-                   waiting_seconds_total=total, waiting_cost=info["cost"])
+    store.update_order(order_id, waiting_started_at=None, waiting_ended_at=now,
+                       waiting_seconds_total=total, waiting_cost=info["cost"])
     cancel_waiting_ticker(order_id)
 
 
@@ -215,7 +232,8 @@ def get_waiting_settings(pickup_city: str = "") -> Dict[str, Any]:
     free_default = FREE_WAIT_MINUTES
     per_default = WAIT_PER_MINUTE
     try:
-        admin = S.admin_data or {}
+        store = _store()
+        admin = store.admin_data or {}
         city_key = ""
         try:
             from core.service_area import normalize_city
@@ -258,7 +276,8 @@ def get_waiting_settings(pickup_city: str = "") -> Dict[str, Any]:
 
 
 def get_waiting_info(order_id: int) -> Dict[str, Any]:
-    order = S.get_order(order_id) or {}
+    store = _store()
+    order = store.get_order(order_id) or {}
     started = order.get("waiting_started_at")
     ended = order.get("waiting_ended_at")
     waiting_seconds = int(order.get("waiting_seconds_total", 0) or 0)
@@ -359,8 +378,16 @@ def balance_hidden() -> bool:
 
 
 def main_menu_rows(user_id: int) -> List[List[Dict[str, Any]]]:
+    today = S.get_driver_stats(user_id, "today")
+    count = int(today.get("count") or 0)
+    earnings = float(today.get("earnings") or 0)
+    try:
+        earn_label = f"{int(earnings)}" if float(earnings).is_integer() else f"{earnings:.0f}"
+    except (TypeError, ValueError):
+        earn_label = "0"
     return [
         _row(_status_menu_label(user_id), "driver:work_status"),
+        _row(f"💵 Сегодня: {earn_label} ₽ · заявок {count}", "driver:today"),
         _row("🚕 Текущие заказы", "driver:current_order"),
         _row("📋 Список заказов", "driver:orders_available"),
         _row("📍 Обновить гео", "driver:location"),
@@ -560,13 +587,13 @@ def _ago_text(user_id: int, ts: Optional[str]) -> str:
 
 
 def driver_main_header(user_id: int) -> str:
-    """Шапка главного меню: статус, доступ, город, адрес, время."""
+    """Шапка главного меню: статус, доступ, город, адрес, заработок за сегодня."""
     u = S.get_user(user_id) or {}
     status = u.get("status", "offline")
     status_text = {"online": "🟢 Онлайн", "offline": "🔴 Оффлайн", "break": "⏸ Перерыв"}.get(status, f"🔴 {status}")
     cfg_comm = S.get_commission_config()
     if not cfg_comm.get("enabled"):
-        access_text = "✅ Доступ полный (бесплатный период)"
+        access_text = "✅ Доступ полный (без комиссии)"
     elif S.has_active_access(user_id):
         exp = S.get_access_expires(user_id)
         access_text = f"✅ Доступ до {exp.strftime('%d.%m %H:%M')}" if exp else "✅ Доступ активен"
@@ -579,9 +606,13 @@ def driver_main_header(user_id: int) -> str:
     address = loc.get("address", "") if isinstance(loc, dict) else ""
     ago = _ago_text(user_id, loc.get("updated_at"))
     name = S.get_driver_name(user_id) or u.get("first_name") or "Пользователь"
+    today = S.get_driver_stats(user_id, "today")
+    earn = float(today.get("earnings") or 0)
+    count = int(today.get("count") or 0)
     return (
         f"👋 {time_based_greeting()}\n\n"
         f"{status_text}\n{access_text}\n\n"
+        f"💵 Сегодня: {fmt_price(earn)} · заявок {count}\n\n"
         f"🏙 Город: {city or current_city or 'не определён'}\n"
         f"📍 Адрес: {address or '—'}\n"
         f"⏱ Обновлено: {ago or 'никогда'}\n\n"

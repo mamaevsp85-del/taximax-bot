@@ -388,7 +388,7 @@ async def driver_set_status(client, user_id, update, ctx):
             keyboard=back_to_main_rows())
         return
     if status == "online":
-        if not S.has_active_access(user_id):
+        if S.commission_requires_access() and not S.has_active_access(user_id):
             await _Reply(client, user_id).send(
                 "❌ Доступ неактивен. Купите часы.",
                 keyboard=balance_rows_for_user(user_id))
@@ -1492,10 +1492,12 @@ async def _finalize_trip_with_geo(client, user_id: int, oid: int,
     logger.info("Фактическая точка высадки #%s: %s, %s", oid, address, city)
 
     # 3) Пересчёт стоимости по тарифу
+    from core.tariff_manager import count_waypoints
     new_price = calculate_trip_price(
         new_distance, new_duration,
         pickup_city=order.get("pickup_city"),
         destination_city=city or order.get("destination_city"),
+        waypoints_count=count_waypoints(order.get("waypoints")),
     )
     logger.info("Стоимость #%s: старая=%.1f, новая=%.1f", oid, old_price, new_price)
 
@@ -1682,7 +1684,59 @@ async def driver_contact_passenger(client, user_id, update, ctx):
         await _Reply(client, user_id).send("❌ Пассажир не найден.", keyboard=back_to_main_rows())
 
 
-# ==================== ИСТОРИЯ ЗАКАЗОВ ====================
+# ==================== СЕГОДНЯ / ИСТОРИЯ ЗАКАЗОВ ====================
+def _history_list_text(orders: List[Dict[str, Any]], title: str) -> str:
+    lines = [f"📋 <b>{title}</b>\n"]
+    for o in orders:
+        oid = o.get("id", 0)
+        ts = o.get("completed_at") or o.get("accepted_at") or o.get("created_at", "")
+        when = ""
+        if isinstance(ts, str) and "T" in ts:
+            when = ts.split("T")[1][:5] if title.startswith("Сегодня") else ts.split("T")[0]
+        elif isinstance(ts, str):
+            when = ts[:10]
+        price = float(o.get("price") or 0) + float(o.get("waiting_cost") or 0)
+        lines.append(f"✅ #{oid}  {when or '—'}  {fmt_price(price)}")
+    return "\n".join(lines)
+
+
+def _history_list_rows(orders: List[Dict[str, Any]], *, back_payload: str) -> List[List[Dict[str, Any]]]:
+    rows: List[List[Dict[str, Any]]] = []
+    for o in orders:
+        oid = o.get("id", 0)
+        price = float(o.get("price") or 0) + float(o.get("waiting_cost") or 0)
+        rows.append([callback_button(
+            f"📄 #{oid} · {fmt_price(price)}", f"driver:history_detail:{oid}")])
+    rows.append(_row("↪️ Назад", back_payload))
+    return rows
+
+
+async def driver_today(client, user_id, update, ctx):
+    """Заработок и завершённые заявки за сегодня."""
+    await _answer_cb(client, update)
+    stats = S.get_driver_stats(user_id, "today")
+    history = S.get_driver_history(user_id, limit=40, period="today")
+    earn = float(stats.get("earnings") or 0)
+    count = int(stats.get("count") or 0)
+    if not history:
+        await _send_menu(
+            client, user_id,
+            f"💵 <b>Сегодня</b>\n\nЗаработано: {fmt_price(earn)}\nЗаявок: {count}\n\n"
+            "Завершённых поездок пока нет.",
+            back_to_main_rows(), replace_previous=1)
+        return
+    text = (
+        f"💵 <b>Сегодня</b>\n\n"
+        f"Заработано: {fmt_price(earn)}\n"
+        f"Заявок: {count}\n\n"
+        + _history_list_text(history[:20], "Сегодня — заявки")
+        + "\n\nНажмите заявку, чтобы открыть детали."
+    )
+    await _send_menu(client, user_id, text,
+                     _history_list_rows(history[:20], back_payload="driver:menu"),
+                     replace_previous=1)
+
+
 async def driver_orders_history(client, user_id, update, ctx):
     """История заказов водителя."""
     await _answer_cb(client, update)
@@ -1693,25 +1747,72 @@ async def driver_orders_history(client, user_id, update, ctx):
                          "Выполняйте заказы, чтобы увидеть их здесь.",
                          back_to_main_rows(), replace_previous=1)
         return
-    lines = ["📋 <b>История заказов</b>\n"]
-    rows: List[List[Dict[str, Any]]] = []
-    for o in history[:15]:
-        oid = o.get("id", 0)
-        ts = o.get("completed_at") or o.get("accepted_at") or o.get("created_at", "")
-        when = ts.split("T")[0] if ts else "—"
-        status_emoji = {"completed": "✅", "cancelled": "❌"}.get(o.get("status"), "❓")
-        lines.append(
-            f"{status_emoji} #{oid}  {when}  "
-            f"{fmt_price(o.get('price', 0))}")
-        rows.append([callback_button(f"📄 #{oid}", f"driver:history_detail:{oid}")])
-    rows.append(_row("↪️ Главное меню", "driver:menu"))
+    text = _history_list_text(history[:15], "История заказов") + \
+        "\n\nНажмите заявку, чтобы открыть детали."
+    await _send_menu(client, user_id, text,
+                     _history_list_rows(history[:15], back_payload="driver:profile"),
+                     replace_previous=1)
+
+
+async def driver_history_detail(client, user_id, update, ctx):
+    """Детали завершённой заявки из истории / «Сегодня»."""
+    await _answer_cb(client, update)
+    oid_str = _cb_id_val(update, "driver:history_detail:")
+    try:
+        oid = int(oid_str)
+    except (TypeError, ValueError):
+        await _Reply(client, user_id).send("❌ Ошибка.", keyboard=back_to_main_rows())
+        return
+    order = S.get_order(oid)
+    if not order or order.get("driver_id") != user_id:
+        await _Reply(client, user_id).send("❌ Заказ не найден.", keyboard=back_to_main_rows())
+        return
+    pickup = order.get("pickup_address") or order.get("pickup") or "—"
+    dest = order.get("dropoff_address") or order.get("destination") or "—"
+    wps = order.get("waypoints") or []
+    stops = []
+    for w in wps:
+        if isinstance(w, dict):
+            stops.append(str(w.get("text") or w.get("address") or "").strip())
+        else:
+            stops.append(str(w).strip())
+    stops = [s for s in stops if s]
+    base = float(order.get("price") or 0)
+    waiting = float(order.get("waiting_cost") or 0)
+    total = base + waiting
+    ts = order.get("completed_at") or order.get("created_at") or ""
+    when = ts.replace("T", " ")[:16] if isinstance(ts, str) else "—"
+    passenger = S.get_user(order.get("passenger_id") or 0) or {}
+    pname = passenger.get("name") or order.get("passenger_name") or "—"
+    lines = [
+        f"📄 <b>Заявка #{oid}</b>\n",
+        f"📅 {when}",
+        f"👤 Пассажир: {pname}",
+        f"📍 Откуда: {pickup}",
+    ]
+    for i, stop in enumerate(stops, 1):
+        lines.append(f"⏸ Остановка {i}: {stop}")
+    lines.extend([
+        f"🎯 Куда: {dest}",
+        f"📏 {float(order.get('distance') or 0):.1f} км · "
+        f"⏱ {int(order.get('time_minutes') or 0)} мин",
+        f"💰 Поездка: {fmt_price(base)}",
+    ])
+    if waiting:
+        lines.append(f"⏳ Ожидание: {fmt_price(waiting)}")
+    lines.append(f"<b>Итого: {fmt_price(total)}</b>")
+    rows = [
+        [callback_button("📋 Сегодня", "driver:today")],
+        [callback_button("📜 Вся история", "driver:orders_history")],
+        _row("↪️ Главное меню", "driver:menu"),
+    ]
     await _send_menu(client, user_id, "\n".join(lines), rows, replace_previous=1)
 
 
 async def driver_history_contact(client, user_id, update, ctx):
     """Написать пассажиру из истории (релей‑сессия)."""
     await _answer_cb(client, update)
-    oid_str = _cb_id_val(update, "driver:history_detail:")
+    oid_str = _cb_id_val(update, "driver:history_contact:")
     try:
         oid = int(oid_str)
     except (TypeError, ValueError):
@@ -1896,9 +1997,11 @@ def register_driver(router: Router) -> None:
     router.on_callback("driver:contact")(driver_contact_passenger)
     router.on_callback("driver:arrived:")(driver_arrived)
 
-    # --- История ---
+    # --- Сегодня / История ---
+    router.on_callback("driver:today")(driver_today)
     router.on_callback("driver:orders_history")(driver_orders_history)
-    router.on_callback("driver:history_detail:")(driver_history_contact)
+    router.on_callback("driver:history_detail:")(driver_history_detail)
+    router.on_callback("driver:history_contact:")(driver_history_contact)
 
     # --- Помощь ---
     router.on_callback("driver:help")(driver_help)

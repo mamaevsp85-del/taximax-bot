@@ -75,6 +75,9 @@ class Storage:
                 "price_per_minute": 3, "min_price": 300,
                 "rounding_type": "up", "rounding_step": 10,
                 "free_waiting_minutes": 5, "waiting_price_per_minute": 5,
+                "day_surcharge_percent": 0, "night_surcharge_percent": 0,
+                "night_start_hour": 22, "night_end_hour": 6,
+                "waypoint_surcharge": 0,
             },
             "tariffs_by_city": {},
             "tariff_edit_scope": "intercity",
@@ -808,6 +811,21 @@ class Storage:
                 return True
             return False
 
+    def remove_favorite_at(self, user_id: int, index: int) -> bool:
+        """Удалить избранный маршрут по индексу в списке."""
+        with self._lock:
+            self._sync()
+            u = self.users.get(int(user_id))
+            if not u:
+                return False
+            favs = list(u.get("favorites") or [])
+            if index < 0 or index >= len(favs):
+                return False
+            favs.pop(index)
+            u["favorites"] = favs
+            self.save()
+            return True
+
     def get_favorites(self, user_id: int) -> List[Dict[str, Any]]:
         u = self.users.get(int(user_id), {})
         return list(u.get("favorites", []) or [])
@@ -1156,8 +1174,17 @@ class Storage:
             self.save()
 
     def balances_disabled(self) -> bool:
-        """True — у водителей скрыты все напоминания и упоминания о балансе."""
-        return bool(self.admin_data.get("balances_disabled"))
+        """True — у водителей скрыты все напоминания и упоминания о балансе.
+
+        Баланс скрыт явно (balances_disabled) или когда комиссия выключена —
+        в бесплатном периоде балансы не используются.
+        """
+        if bool(self.admin_data.get("balances_disabled")):
+            return True
+        try:
+            return not bool(self.get_commission_config().get("enabled"))
+        except Exception:
+            return bool(self.admin_data.get("balances_disabled"))
 
     def set_balances_disabled(self, enabled: bool) -> None:
         """Включить/выключить режим скрытия балансов у водителей."""
@@ -1499,14 +1526,33 @@ class Storage:
                 "car_photo_interior_id")
         return all(u.get(k) for k in keys)
 
-    def get_driver_history(self, driver_id: int, limit: int = 20) -> List[Dict[str, Any]]:
-        """Завершённые заказы водителя (история), новые первыми."""
+    def get_driver_history(self, driver_id: int, limit: int = 20,
+                           period: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Завершённые заказы водителя (история), новые первыми.
+
+        period: None — все; "today"/"day" — только за сегодня.
+        """
+        since = until = None
+        if period in ("today", "day"):
+            today = datetime.now().date()
+            since = datetime.combine(today, datetime.min.time())
+            until = datetime.combine(today + timedelta(days=1), datetime.min.time())
         result = []
         for o in sorted(self.orders.values(), key=lambda x: x.get("id", 0), reverse=True):
             if o.get("driver_id") != int(driver_id):
                 continue
             if o.get("status") != "completed":
                 continue
+            if since is not None:
+                ts = o.get("completed_at") or o.get("accepted_at") or o.get("created_at")
+                if not ts:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(ts) if isinstance(ts, str) else ts
+                except Exception:
+                    continue
+                if not (since <= dt < until):
+                    continue
             result.append(o)
             if len(result) >= limit:
                 break
@@ -1559,7 +1605,9 @@ class Storage:
         return {
             "orders_total": orders_total, "orders_completed": orders_completed,
             "revenue": round(revenue, 2), "rating": u.get("rating", 5.0),
-            "count": u.get("orders_completed", 0), "earnings": float(u.get("earnings", 0.0) or 0.0),
+            "count": orders_completed,
+            "earnings": round(revenue, 2),
+            "lifetime_earnings": float(u.get("earnings", 0.0) or 0.0),
         }
 
     def get_driver_order_queue(self, driver_id: int) -> List[int]:

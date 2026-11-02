@@ -170,6 +170,10 @@
       if (found) { found.status = "accepted"; S.driver.current = found; }
     }
     if (op === "driver.arrived" && S.driver && S.driver.current) S.driver.current.status = "driver_arrived";
+    // driver.wait НЕ меняет статус заказа — только таймер ожидания.
+    if (op === "driver.wait" && S.driver && S.driver.current) {
+      S.driver.current.waiting = S.driver.current.waiting || {};
+    }
     if (op === "driver.start" && S.driver && S.driver.current) S.driver.current.status = "in_progress";
     if (op === "driver.complete" && S.driver && S.driver.current) S.driver.current.status = "completed";
     if (op === "driver.cancel" && S.driver && S.driver.current && S.driver.current.id === body.id) {
@@ -334,11 +338,18 @@
       numField("included_km", "Включено км", t.included_km, "2") +
       numField("price_per_km", "Цена за км", t.price_per_km, "20") +
       numField("price_per_minute", "За минуту пути", t.price_per_minute, "2") +
-      numField("min_price", "Минимальная цена", t.min_price, "50");
+      numField("min_price", "Минимальная цена", t.min_price, "50") +
+      numField("day_surcharge_percent", "Дневная наценка, %", t.day_surcharge_percent, "0") +
+      numField("night_surcharge_percent", "Ночная наценка, %", t.night_surcharge_percent, "0") +
+      numField("night_start_hour", "Ночь с часа", t.night_start_hour != null ? t.night_start_hour : 22, "22") +
+      numField("night_end_hour", "Ночь до часа", t.night_end_hour != null ? t.night_end_hour : 6, "6") +
+      numField("waypoint_surcharge", "Точка по пути, ₽", t.waypoint_surcharge, "0");
   }
   function tariffBody(extra) {
     var body = extra || {};
-    ["base_price", "included_km", "price_per_km", "price_per_minute", "min_price"].forEach(function (k) {
+    ["base_price", "included_km", "price_per_km", "price_per_minute", "min_price",
+     "day_surcharge_percent", "night_surcharge_percent", "night_start_hour",
+     "night_end_hour", "waypoint_surcharge"].forEach(function (k) {
       var raw = val(k);
       if (raw !== "") body[k] = Number(raw);
     });
@@ -530,7 +541,7 @@
         }).join("");
     },
     roles: function () {
-      var names = { passenger: ["Пассажир", "Заказ, история, избранное"], driver: ["Водитель", "Линия, рейсы, баланс"], admin: ["Админ", "Водители, заказы, настройки"] };
+      var names = { passenger: ["Пассажир", "Заказ, история, избранное"], driver: ["Водитель", "Линия, рейсы, заработок"], admin: ["Админ", "Водители, заказы, настройки"] };
       return "<h2>Выберите роль</h2>" + S.user.roles.map(function (r) {
         var n = names[r] || [r, ""];
         return '<button class="role-card' + (S.user.role === r ? " on" : "") + '" data-act="role" data-role="' + r + '"><span class="avatar">' +
@@ -674,7 +685,8 @@
         return '<div class="card"><b>' + esc(f.label || "Маршрут") + "</b>" +
           (sub ? '<p class="muted">' + esc(sub) + "</p>" : "") +
           '<div class="btn-row"><button class="btn" data-act="use-fav" data-index="' + i + '">Заказать</button>' +
-          '<button class="btn ghost" data-act="edit-fav" data-index="' + i + '">Изменить</button></div></div>';
+          '<button class="btn ghost" data-act="edit-fav" data-index="' + i + '">Изменить</button>' +
+          '<button class="btn danger" data-act="del-fav" data-index="' + i + '">Удалить</button></div></div>';
       }).join("") : '<p class="list-empty">Сохраните маршрут из завершённой поездки</p>');
     },
     welcome: function () {
@@ -766,18 +778,54 @@
     driver: function () {
       var u = S.user;
       var line = u.line === "online" ? "На линии" : u.line === "break" ? "Перерыв" : "Оффлайн";
+      var today = (S.driver && S.driver.today) || {};
+      var todayCount = today.count || 0;
+      var todayEarn = today.earnings || 0;
       return '<div class="card" style="margin-top:0"><div class="row"><div><b>' + esc(u.driver_name || u.name) +
         '</b><div class="muted">' + esc([u.car_model, u.car_number].filter(Boolean).join(" · ")) + "</div></div>" +
         '<span class="badge ' + (u.line === "online" ? "ok" : "off") + '">' + line + "</span></div>" +
         '<div class="seg" style="margin-top:12px">' +
         seg("online", "На линии") + seg("break", "Перерыв") + seg("offline", "Оффлайн") + "</div></div>" +
+        '<div class="stat-grid" style="margin-top:12px">' +
+        '<div class="stat"><span class="muted">Сегодня</span><b>' + money(todayEarn) + '</b></div>' +
+        '<button class="stat" data-act="tab" data-screen="d-today" style="text-align:left;cursor:pointer;border:0;background:inherit;font:inherit;color:inherit">' +
+        '<span class="muted">Заявок</span><b>' + todayCount + '</b></button></div>' +
         (S.driver.current ? orderCard(S.driver.current, "d-open") : "") +
         group("На линии") +
         '<div class="grid">' +
         tile("d-orders", "☰", "Список заказов", "свободные рядом") +
         tile("d-current", "▶", "Текущий рейс", S.driver.current ? "заказ #" + S.driver.current.id : "нет рейса") +
-        tile("d-profile", "☺", "Профиль", "авто, баланс, документы") +
+        tile("d-today", "💵", "Сегодня", todayCount + " заявок · " + money(todayEarn)) +
+        tile("d-profile", "☺", "Профиль", "авто и документы") +
         "</div>";
+    },
+    "d-today": function () {
+      var today = (S.driver && S.driver.today) || {};
+      var list = (S.driver && S.driver.today_orders) || [];
+      return "<h2>Сегодня</h2>" +
+        '<div class="stat-grid"><div class="stat"><span class="muted">Заработано</span><b>' + money(today.earnings || 0) +
+        '</b></div><div class="stat"><span class="muted">Заявок</span><b>' + (today.count || 0) + "</b></div></div>" +
+        (list.length ? list.map(function (o) {
+          return orderCard(o, "d-today-open");
+        }).join("") : '<p class="list-empty">Завершённых заявок за сегодня нет</p>');
+    },
+    "d-today-detail": function () {
+      var o = orderById(picked) || ((S.driver.today_orders || []).filter(function (x) { return x.id === picked; })[0]);
+      if (!o) return "<h2>Заявка</h2><p class=\"list-empty\">Не найдена</p>" +
+        '<button class="btn ghost" data-act="tab" data-screen="d-today">Назад</button>';
+      var stops = (o.waypoints || []).map(function (w) {
+        return typeof w === "string" ? w : (w.text || w.address || "");
+      }).filter(Boolean);
+      return '<div class="row"><h2 style="margin:0">Заявка #' + o.id + "</h2>" + badge(o.status) + "</div>" +
+        '<div class="card"><div class="route">' + esc(o.pickup) +
+        (stops.length ? stops.map(function (s) { return "<small>⏸ " + esc(s) + "</small>"; }).join("") : "") +
+        "<small>" + esc(o.destination) + "</small></div>" +
+        '<div class="row" style="margin-top:12px"><span class="muted">Расстояние</span><b>' + Number(o.distance || 0).toFixed(1) + " км</b></div>" +
+        '<div class="row"><span class="muted">Время</span><b>' + (o.time_minutes || 0) + " мин</b></div>" +
+        '<div class="row"><span class="muted">Стоимость</span><b>' + money(o.final_price || o.price) + "</b></div>" +
+        (o.completed_at ? '<div class="row"><span class="muted">Завершена</span><b>' + esc(fmtDateTime(o.completed_at)) + "</b></div>" : "") +
+        "</div>" +
+        '<button class="btn ghost" data-act="tab" data-screen="d-today">К списку</button>';
     },
     "d-orders": function () {
       if (S.user.line !== "online") return "<h2>Список заказов</h2><p class=\"list-empty\">Сначала выйдите на линию</p>";
@@ -820,21 +868,26 @@
         (["accepted", "driver_arrived", "in_progress", "pending"].indexOf(o.status) >= 0 ? '<button class="btn danger" data-act="d-cancel" data-id="' + o.id + '">Отменить заказ</button>' : "");
     },
     "d-profile": function () {
-      var hidden = S.user.balance_hidden;
+      var today = (S.driver && S.driver.today) || {};
+      // Баланс показываем только при включённой комиссии (платные смены).
+      // Сейчас работаем без комиссии — баланс не нужен.
+      var showBalance = !!(S.user.commission_enabled && !S.user.balance_hidden);
       return "<h2>Профиль</h2><div class=\"card\"><b>" + esc(S.user.driver_name) + '</b><p class="muted">' +
         esc(S.user.driver_phone) + "<br>" + esc(S.user.car_model) + " · " + esc(S.user.car_number) + " · " + esc(S.user.car_color) +
-        (hidden ? "" : "<br>Баланс " + money(S.user.balance)) + "<br>Доступ " + (S.user.access ? "есть" : "нет") + "</p></div>" +
+        (showBalance ? "<br>Баланс " + money(S.user.balance) : "") +
+        "<br>Сегодня " + money(today.earnings || 0) + " · заявок " + (today.count || 0) + "</p></div>" +
         group("Машина") +
         '<div class="grid">' +
         tile("d-car", "▣", "Автомобиль", "марка, номер, цвет") +
         tile("d-docs", "▣", "Документы", "фото для проверки") +
+        tile("d-today", "💵", "Сегодня", (today.count || 0) + " заявок") +
         tile("d-stats", "▦", "Статистика", "день и месяц") +
         tile("d-history", "↺", "История", "закрытые рейсы") +
         "</div>" +
         group("Аккаунт") +
         row("Имя", S.user.driver_name, "sheet-dname", null, "☺") +
         row("Телефон", S.user.driver_phone, "sheet-dphone", null, "#") +
-        (hidden ? "" : row("Баланс", money(S.user.balance), "tab", { screen: "d-balance" }, "₽")) +
+        (showBalance ? row("Баланс", money(S.user.balance), "tab", { screen: "d-balance" }, "₽") : "") +
         row("Помощь", "как устроена линия", "help", null, "?");
     },
     "d-car": function () {
@@ -862,6 +915,11 @@
       return "<h2>История заказов</h2>" + (list.length ? list.map(function (o) { return orderCard(o, "noop"); }).join("") : '<p class="list-empty">Пусто</p>');
     },
     "d-balance": function () {
+      // Баланс нужен только при включённой комиссии (платные смены).
+      if (!S.user.commission_enabled) {
+        return "<h2>Баланс</h2><p class=\"muted\">Сейчас работаем без комиссии — " +
+          "баланс и платные смены не используются.</p>";
+      }
       var tariffs = S.driver.tariffs || {};
       var keys = Object.keys(tariffs);
       return "<h2>Баланс</h2><div class=\"price\">" + money(S.user.balance) + "</div>" +
@@ -1658,6 +1716,19 @@
     "sheet-complaint": function (el) { sheet("<h2>Жалоба</h2>" + field("complaint", "Что не совпало", "", "номер, цвет, водитель") + '<button class="btn" data-act="save-complaint" data-id="' + el.dataset.id + '">Отправить</button>'); },
     "save-complaint": function (el) { closeSheet(); run({ op: "order.complaint", id: Number(el.dataset.id), text: val("complaint") }); },
     "fav-add": function (el) { run({ op: "favorite.add", id: Number(el.dataset.id) }).then(function () { toast("В избранном"); }); },
+    "del-fav": function (el) {
+      var index = Number(el.dataset.index);
+      var fav = ((S.passenger && S.passenger.favorites) || [])[index] || {};
+      // Без window.confirm: в WebView MAX нативные confirm/prompt могут
+      // блокироваться, и кнопка «Удалить» не срабатывала вообще.
+      run({ op: "favorite.remove", index: index }).then(function (ok) {
+        if (ok) { toast("Маршрут удалён"); screen = "favorites"; render(); }
+      });
+    },
+    "d-today-open": function (el) {
+      picked = Number(el.dataset.id);
+      go("d-today-detail");
+    },
     "use-fav": function (el) {
       var index = Number(el.dataset.index);
       api("/api/act", { op: "favorite.preview", index: index }).then(function (data) {
@@ -1909,7 +1980,21 @@
     accept: function (el) { screen = "d-current"; run({ op: "driver.accept", id: Number(el.dataset.id) }); },
     "d-open": function (el) { screen = "d-current"; render(); },
     arrived: function (el) { run({ op: "driver.arrived", id: Number(el.dataset.id) }); },
-    wait: function (el) { run({ op: "driver.wait", id: Number(el.dataset.id) }); },
+    wait: function (el) {
+      var oid = Number(el.dataset.id);
+      var cur = S && S.driver && S.driver.current;
+      var statusBefore = cur ? cur.status : "";
+      run({ op: "driver.wait", id: oid }).then(function (ok) {
+        if (!ok) return;
+        // Защита: «Ожидание» НЕ должно менять статус заказа. Если сервер
+        // (или устаревший кэш) вернул другой статус — возвращаем прежний,
+        // чтобы «Завершить поездку» не превратилось в «Начать движение».
+        if (cur && statusBefore && cur.status !== statusBefore) {
+          cur.status = statusBefore;
+          render();
+        }
+      });
+    },
     "start-trip": function (el) { run({ op: "driver.start", id: Number(el.dataset.id) }); },
     complete: function (el) {
       run({ op: "driver.complete", id: Number(el.dataset.id) });
@@ -1956,12 +2041,10 @@
       run(body);
     },
     "adm-delete": function (el) {
-      var kind = el.dataset.kind === "passenger" ? "пассажира" : "водителя";
-      var name = el.dataset.name || "";
-      if (!window.confirm("Удалить " + kind + (name ? " «" + name + "»" : "") + "?")) return;
       var back = el.dataset.kind === "passenger" ? "a-passengers" : "a-drivers";
       run({ op: "admin.delete", id: Number(el.dataset.id) }).then(function (ok) {
         if (!ok) return;
+        toast("Удалено");
         screen = back;
         render();
       });
@@ -1979,9 +2062,16 @@
       run(body);
     },
     "adm-reject": function (el) {
-      var reason = window.prompt("Причина отклонения", "не хватает данных");
-      if (reason == null) return;
-      run({ op: "admin.reject", id: Number(el.dataset.id), reason: reason });
+      // Без window.prompt (в WebView MAX блокируется): форма в шторке.
+      picked = Number(el.dataset.id);
+      sheet("<h2>Отклонить заявку</h2>" +
+        field("reason", "Причина отклонения", "", "не хватает данных") +
+        '<button class="btn danger" data-act="adm-reject-do">Отклонить</button>');
+    },
+    "adm-reject-do": function () {
+      var reason = val("reason") || "не хватает данных";
+      closeSheet();
+      run({ op: "admin.reject", id: picked, reason: reason });
     },
     "sheet-admin-balance": function (el) { sheet("<h2>Баланс</h2>" + field("amount", "Сумма", "100", "") + '<button class="btn" data-act="admin-balance" data-id="' + el.dataset.id + '">Начислить</button>'); },
     "admin-balance": function (el) { closeSheet(); run({ op: "admin.balance", id: Number(el.dataset.id), amount: Number(val("amount")) }); },
@@ -2003,8 +2093,10 @@
     },
     "delete-tariff": function (el) {
       var city = el.dataset.city || "";
-      if (!city || !window.confirm("Удалить тариф города «" + city + "»?")) return;
-      run({ op: "admin.tariff.delete", city: city });
+      if (!city) return;
+      run({ op: "admin.tariff.delete", city: city }).then(function (ok) {
+        if (ok) toast("Тариф удалён");
+      });
     },
     "edit-intercity": function () {
       var t = (S.admin && S.admin.intercity) || {};
@@ -2268,8 +2360,9 @@
     _myChatSent[orderId] = _myChatSent[orderId] || {};
     _myChatSent[orderId][sig] = true;
     _chatSeen[orderId] = { n: list.length, sig: sig };
-    // Своё сообщение не должно всплывать уведомлением — сдвигаем курсор.
-    if (last.at && last.at > _chatCursor) _chatCursor = last.at;
+    // Курсор здесь НЕ двигаем: иначе наше сообщение будет пропущено
+    // и на «своём» аккаунте уведомление не покажется никогда.
+    // Фильтр своих сообщений делает pollChat по сигнатуре.
   }
 
   function openDialog(orderId) {
@@ -2314,7 +2407,9 @@
         if (m.at && m.at > _chatCursor) _chatCursor = m.at;
         // своё сообщение (отправлено с этого устройства) — пропускаем
         var own = (_myChatSent[m.order_id] || {})[chatSig(m)];
-        if (own) continue;
+        // Когда пассажир и водитель — один аккаунт (тест на одном телефоне),
+        // своё сообщение тоже показываем: иначе уведомлений не будет вообще.
+        if (own && !m.same_account) continue;
         if (!grouped[m.order_id]) { grouped[m.order_id] = []; orderIds.push(m.order_id); }
         grouped[m.order_id].push(m.text);
       }
@@ -2360,7 +2455,7 @@
       for (var j = 0; j < fresh.length; j++) {
         var m = fresh[j];
         if (!m || !m.text) continue;
-        if (mine[chatSig(m)]) continue;
+        if (mine[chatSig(m)] && !o.same_account) continue;
         lines.push(m.text);
       }
       if (!lines.length) continue;
@@ -2369,6 +2464,12 @@
         (role === "driver" ? "Пассажир" : "Водитель") + " · заказ #" + o.id,
         (function (id) { return function () { openDialog(id); }; })(o.id));
     }
+  }
+
+  function confirmAction(text, onYes) {
+    // Оставлено для совместимости: в WebView MAX нативные confirm/prompt
+    // могут блокироваться, поэтому действия удаления выполняем напрямую.
+    if (typeof onYes === "function") onYes();
   }
 
   // ==================== ВСПЛЫВАЮЩЕЕ ОКНО СООБЩЕНИЯ ====================
@@ -2532,6 +2633,25 @@
     }
   }
 
+  // ==================== АВТООБНОВЛЕНИЕ КОДА ====================
+  // WebView в MAX кэширует app.js агрессивно: без этой проверки телефон
+  // продолжает работать на старой версии и правки «не приходят».
+  // Сравниваем build с сервером; если изменился — перезагружаем страницу.
+  var _buildSeen = "";
+
+  function checkBuild() {
+    api("/api/version").then(function (v) {
+      var build = (v && v.build) || "";
+      if (!build) return;
+      if (!_buildSeen) { _buildSeen = build; return; }
+      if (build !== _buildSeen) {
+        _buildSeen = build;
+        toast("Обновление приложения…");
+        setTimeout(function () { location.reload(); }, 600);
+      }
+    }).catch(function () {});
+  }
+
   // Опрос состояния — уведомления без перерисовки, чтобы не стирать ввод
   setInterval(function () {
     if (!S || inflight) return;
@@ -2556,6 +2676,11 @@
     if (!S || !S.user || !S.user.id) return;
     try { pollChat(); } catch (e) {}
   }, 3000);
+
+  // Проверка версии кода: раз в 30 секунд.
+  setInterval(function () {
+    try { checkBuild(); } catch (e) {}
+  }, 30000);
 
 
   function showPeople() {

@@ -1014,6 +1014,11 @@ def register_admin(router: Router) -> None:
         "rounding_step": "Шаг округления",
         "waiting_price_per_minute": "Цена за минуту ожидания",
         "free_waiting_minutes": "Бесплатные минуты ожидания",
+        "day_surcharge_percent": "Дневная наценка, %",
+        "night_surcharge_percent": "Ночная наценка, %",
+        "night_start_hour": "Ночь с часа (0–23)",
+        "night_end_hour": "Ночь до часа (0–23)",
+        "waypoint_surcharge": "Наценка за промежуточную точку, ₽",
     }
 
     def _scope_kwargs():
@@ -1064,6 +1069,11 @@ def register_admin(router: Router) -> None:
             [callback_button("💰 Цена за доп. км", "a:tariff:edit:price_per_km")],
             [callback_button("⏰ Стоимость за минуту", "a:tariff:edit:price_per_minute")],
             [callback_button("💳 Минимальная стоимость", "a:tariff:edit:min_price")],
+            [callback_button("☀️ Дневная наценка %", "a:tariff:edit:day_surcharge_percent")],
+            [callback_button("🌙 Ночная наценка %", "a:tariff:edit:night_surcharge_percent")],
+            [callback_button("🌙 Ночь с часа", "a:tariff:edit:night_start_hour")],
+            [callback_button("🌙 Ночь до часа", "a:tariff:edit:night_end_hour")],
+            [callback_button("📍 Точка по пути, ₽", "a:tariff:edit:waypoint_surcharge")],
             [callback_button("🔢 Настройки округления", "a:tariff:rounding")],
             [callback_button("⏳ Тарификация ожидания", "a:tariff:waiting")],
             [callback_button("↪️ Назад к тарифам", "a:tariffs")],
