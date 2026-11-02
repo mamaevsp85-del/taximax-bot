@@ -28,8 +28,18 @@ class PipeTests(unittest.TestCase):
     def setUp(self):
         path = str(Path(self.temp.name) / f"{self._testMethodName}.json")
         self.s = self.storage_module.Storage(path)
+        # ВАЖНО: api_server при импорте пересоздаёт core.storage.storage,
+        # поэтому maximus_server.S и storage.storage могут указывать на разные
+        # объекты. Тест пишет через srv.S, а читает через tariff_manager
+        # (storage.storage) — подменяем оба, иначе значения расходятся.
+        self._orig_srv = self.srv.S
+        self._orig_storage = self.storage_module.storage
         self.srv.S = self.s
-        self.s.ensure_user(10)
+        self.storage_module.storage = self.s
+
+    def tearDown(self):
+        self.srv.S = self._orig_srv
+        self.storage_module.storage = self._orig_storage
 
     def test_bot_link_from_username(self):
         self.s.admin_data["bot_username"] = "se14566736_bot"

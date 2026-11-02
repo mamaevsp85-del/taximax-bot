@@ -51,6 +51,21 @@ def _ask(client, user_id):
     return Reply(client, user_id, edit_last=False, track_menu=False)
 
 
+def _hop_km(lat1, lon1, lat2, lon2):
+    """Расстояние между точками, км. None, если координат нет."""
+    import math
+    try:
+        lat1, lon1, lat2, lon2 = float(lat1), float(lon1), float(lat2), float(lon2)
+    except (TypeError, ValueError):
+        return None
+    radius = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * radius * math.asin(math.sqrt(min(1.0, h)))
+
+
 def _normalize_phone(phone: str) -> str:
     """Приводит номер к виду 7XXXXXXXXXX (или оставляет как есть, если странный)."""
     if not phone:
@@ -360,9 +375,15 @@ def register_passenger(router: Router) -> None:
             return
 
         await fsm.update_data(pickup=addr, pickup_city=city,
-                              pickup_coords={"lat": lat, "lon": lon})
-        await fsm.update_data(stage="destination")
-        await fsm.set_state("passenger:await_dest")
+                              pickup_coords={"lat": lat, "lon": lon}, entrance="")
+        await fsm.set_state("passenger:await_entrance")
+        await reply.send(
+            f"✅ Адрес подачи: <b>{addr}</b>\n\n"
+            "Напишите номер подъезда или нажмите «Без подъезда».",
+            keyboard=[[callback_button("Без подъезда", "passenger:entrance_skip")],
+                      [callback_button("↪️ Меню", "passenger:menu")]])
+
+    async def _ask_destination(reply, addr: str):
         await reply.send(
             f"✅ Адрес подачи сохранён: <b>{addr}</b>\n\n"
             "Теперь укажите, КУДА нужно доехать (адрес назначения):\n\n"
@@ -371,7 +392,32 @@ def register_passenger(router: Router) -> None:
             keyboard=[[request_geo_location_button("📍 Отправить геолокацию", quick=True)],
                       [callback_button("↪️ Меню", "passenger:menu")]])
 
+    async def await_entrance(client, user_id, update, ctx):
+        reply = _ask(client, user_id)
+        fsm = get_context(user_id)
+        text = sanitize_input(update.message.text) if update.message else ""
+        if not text:
+            await reply.send(
+                "Напишите номер подъезда или нажмите «Без подъезда».",
+                keyboard=[[callback_button("Без подъезда", "passenger:entrance_skip")],
+                          [callback_button("↪️ Меню", "passenger:menu")]])
+            return
+        await fsm.update_data(entrance=text[:20], stage="destination")
+        await fsm.set_state("passenger:await_dest")
+        data = await fsm.get_data()
+        await _ask_destination(reply, data.get("pickup") or "")
+
+    async def entrance_skip(client, user_id, update, ctx):
+        reply = _ask(client, user_id)
+        fsm = get_context(user_id)
+        await fsm.update_data(entrance="", stage="destination")
+        await fsm.set_state("passenger:await_dest")
+        data = await fsm.get_data()
+        await _ask_destination(reply, data.get("pickup") or "")
+
     router.on_state("passenger:await_pickup")(await_pickup)
+    router.on_state("passenger:await_entrance")(await_entrance)
+    router.on_callback("passenger:entrance_skip")(entrance_skip)
 
     # --- ввод адреса назначения ---
     async def await_dest(client, user_id, update, ctx):
@@ -432,8 +478,14 @@ def register_passenger(router: Router) -> None:
                              keyboard=[[callback_button("📍 Остановить заказ", "passenger:menu")]])
             return
 
-        # Город назначения: не делаем межгород, если пассажир его не указывал
-        dest_city = resolve_destination_city(data.get("pickup_city"), city, addr)
+        # Межгород — разные города. Далёкий ложный геокод без названия города
+        # не переключает тариф.
+        pickup_coords = data.get("pickup_coords") or {}
+        hop = None
+        if pickup_coords.get("lat") is not None and lat is not None:
+            hop = _hop_km(pickup_coords.get("lat"), pickup_coords.get("lon"), lat, lon)
+        dest_city = resolve_destination_city(
+            data.get("pickup_city"), city, addr, distance_km=hop)
         price = calculate_trip_price(distance, duration,
                                      pickup_city=data.get("pickup_city"),
                                      destination_city=dest_city)
@@ -441,6 +493,7 @@ def register_passenger(router: Router) -> None:
         await fsm.update_data(destination=addr, destination_city=dest_city,
                               destination_coords={"lat": lat, "lon": lon},
                               distance=distance, time_minutes=duration, price=price,
+                              calc_price=price,
                               is_intercity=intercity)
         await fsm.update_data(stage="confirm")
         await fsm.set_state(None)  # экран подтверждения управляется кнопками
@@ -466,20 +519,32 @@ def register_passenger(router: Router) -> None:
         fsm = get_context(user_id)
         data = await fsm.get_data()
         if not data.get("pickup") or not data.get("destination"):
-            await reply.send("❌ Данные заказа утеряны. Начните создание заново: /start",
+            await reply.send("❌ Данные заказа утеряны. Начните создание заказа заново: /start",
                              keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
             await fsm.clear()
             return
 
+        # Своя цена не может быть ниже рассчитанной стоимости.
+        price = int(data.get("price") or 0)
+        calc = int(data.get("calc_price") or price)
+        if calc > 0 and price < calc:
+            await reply.send(
+                f"❌ Своя цена не может быть ниже рассчитанной стоимости: {calc} руб.",
+                keyboard=[[callback_button("↪️ Меню", "passenger:menu")],
+                          [callback_button("💬 Предложить свою цену", "passenger:offer_own_price")]])
+            return
+
         order_id = S.create_order({
             "passenger_id": user_id,
-            "pickup": data["pickup"],
+            "pickup": storage.with_entrance(data["pickup"], data.get("entrance")),
+            "entrance": (data.get("entrance") or "").strip(),
             "destination": data["destination"],
             "pickup_coords": data.get("pickup_coords"),
             "destination_coords": data.get("destination_coords"),
             "distance": data.get("distance", 0),
             "time_minutes": data.get("time_minutes", 0),
-            "price": data.get("price", 0),
+            "base_price": calc,
+            "price": price,
             "pickup_city": data.get("pickup_city"),
             "destination_city": data.get("destination_city"),
             "waypoints": data.get("waypoints", []),
@@ -753,12 +818,17 @@ def register_passenger(router: Router) -> None:
         if not pid:
             await _menu(client, user_id).send("❌ Водитель пока не назначен.")
             return
-        start_relay_session(user_id, pid, order_id, hours=24.0)
-        await fsm.clear()
-        await fsm.set_state(STATE_RELAY)
-        await _menu(client, user_id).send(
-            "📞 Позвонил(а) пассажир. Ожидает ответа в чате.",
-            keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+        driver = S.get_user(pid) or {}
+        name = driver.get("driver_name") or driver.get("name") or "Водитель"
+        phone = driver.get("phone") or ""
+        from max_api.keyboards import contact_attachment, keyboard_attachment
+        await client.send_message(
+            user_id=user_id,
+            text="📞 <b>Водитель</b>\nНажмите на карточку и позвоните в MAX.",
+            text_format="html",
+            attachments=[contact_attachment(name, int(pid), phone)] + keyboard_attachment(
+                [[callback_button("↪️ Меню", "passenger:menu")]]),
+        )
 
     router.on_callback("passenger:contact:")(passenger_contact_order)
     router.on_callback("passenger:call:")(passenger_call_order)
@@ -838,11 +908,24 @@ def register_passenger(router: Router) -> None:
                              keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
             return
         data = await fsm.get_data()
+        order_id = data.get("offer_order_id")
+
+        # Своя цена — только строго больше рассчитанной стоимости.
+        calc = int(data.get("calc_price") or data.get("price") or 0)
+        if order_id and data.get("stage") == "offer_price":
+            order = S.get_order(order_id)
+            if order:
+                calc = int(order.get("base_price") or order.get("price") or 0)
+        if calc > 0 and price <= calc:
+            await reply.send(
+                f"❌ Своя цена должна быть больше рассчитанной стоимости: {calc} руб.",
+                keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            return
+
         await fsm.update_data(price=price)
         await fsm.set_state(None)  # возврат к экрану подтверждения
 
         # если цена предложена по уже созданному заказу — обновляем его
-        order_id = data.get("offer_order_id")
         if order_id and data.get("stage") == "offer_price":
             order = S.get_order(order_id)
             if order and order.get("passenger_id") == user_id:
@@ -1108,9 +1191,10 @@ def register_passenger(router: Router) -> None:
             oid = f.get("order_id")
             label = f.get("label") or (f"Заказ #{oid}" if oid else f"Избранное #{i+1}")
             lines.append(f"{i+1}. {label}")
-            if oid:
-                rows.append([callback_button(f"🚖 Использовать: {label}",
-                                             f"passenger:favorite_use:{i}")])
+            rows.append([callback_button(f"🚖 {label[:42]}",
+                                         f"passenger:favorite_use:{i}")])
+            rows.append([callback_button(f"✏️ Изменить {i + 1}",
+                                         f"passenger:favorite_edit:{i}")])
         rows.append([callback_button("↪️ Меню", "passenger:menu")])
         await reply.send("\n".join(lines), keyboard=rows)
 
@@ -1161,42 +1245,151 @@ def register_passenger(router: Router) -> None:
             await reply.send("❌ Избранное не найдено.",
                              keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
             return
-        f = favs[idx]
-        oid = f.get("order_id")
-        if not oid:
-            await reply.send("❌ В этом избранном нет заказа.",
+        try:
+            route = S.favorite_route(user_id, idx)
+        except ValueError as exc:
+            await reply.send(f"❌ {exc}",
                              keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
             return
-        order = S.get_order(int(oid))
-        if not order:
-            await reply.send("❌ Заказ не найден.",
+        pickup = storage.with_entrance(route["pickup"], route["entrance"])
+        await reply.send(
+            "📋 <b>Подтверждение заказа</b>\n\n"
+            f"📍 {pickup}\n"
+            f"🎯 {route['destination']}\n\n"
+            f"💰 {route['price'] or 0} руб.",
+            keyboard=[[callback_button("👍 Подтвердить заказ",
+                                       f"passenger:favorite_confirm:{idx}")],
+                      [callback_button("↪️ Меню", "passenger:menu")]])
+
+    async def favorite_confirm(client, user_id, update, ctx):
+        reply = _menu(client, user_id)
+        try:
+            idx = int(update.callback.payload.split(":")[-1])
+        except (AttributeError, ValueError):
+            await reply.send("❌ Ошибка.", keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            return
+        favs = (S.get_user(user_id) or {}).get("favorites") or []
+        if idx < 0 or idx >= len(favs):
+            await reply.send("❌ Избранное не найдено.",
                              keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
             return
+        try:
+            route = S.favorite_route(user_id, idx)
+        except ValueError as exc:
+            await reply.send(f"❌ {exc}",
+                             keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            return
+        src = route["src"] or {}
         new_oid = S.create_order({
             "passenger_id": user_id,
-            "pickup": order.get("pickup", ""),
-            "destination": order.get("destination", ""),
-            "pickup_coords": order.get("pickup_coords"),
-            "destination_coords": order.get("destination_coords"),
-            "distance": order.get("distance", 0),
-            "time_minutes": order.get("time_minutes", 0),
-            "price": order.get("price", 0),
-            "pickup_city": order.get("pickup_city"),
-            "destination_city": order.get("destination_city"),
-            "waypoints": order.get("waypoints", []),
+            "pickup": storage.with_entrance(route["pickup"], route["entrance"]),
+            "entrance": route["entrance"],
+            "destination": route["destination"],
+            "pickup_coords": route["pickup_coords"],
+            "destination_coords": route["destination_coords"],
+            "distance": route["km"],
+            "time_minutes": route["minutes"],
+            "price": route["price"] or 0,
+            "base_price": route["price"] or 0,
+            "pickup_city": route["pickup_city"],
+            "destination_city": route["destination_city"],
+            "waypoints": route["waypoints"] or src.get("waypoints") or [],
             "status": "pending",
             "created_at": datetime.now().isoformat(),
         })
-        await reply.send(
-            f"🚖 <b>Заказ #{new_oid} создан из избранного!</b>\n\n"
-            f"📍 {order.get('pickup', '')} → {order.get('destination', '')}\n"
-            f"💰 {order.get('price', 0)} руб.",
-            keyboard=[[callback_button(f"🚖 Статус заказа #{new_oid}",
-                                       f"passenger:order:{new_oid}")],
-                      [callback_button("↪️ Меню", "passenger:menu")]])
+        from types import SimpleNamespace
+        await show_order(
+            client, user_id,
+            SimpleNamespace(callback=SimpleNamespace(payload=f"passenger:order:{new_oid}")),
+            ctx,
+        )
         await notify_drivers_about_order(client, new_oid)
 
+    async def favorite_edit(client, user_id, update, ctx):
+        reply = _ask(client, user_id)
+        try:
+            idx = int(update.callback.payload.split(":")[-1])
+            route = S.favorite_route(user_id, idx)
+        except (AttributeError, ValueError) as exc:
+            await reply.send(f"❌ {exc}",
+                             keyboard=[[callback_button("⭐ Избранное", "passenger:favorites")]])
+            return
+        fsm = get_context(user_id)
+        await fsm.set_state("passenger:fav_edit_pickup")
+        await fsm.update_data(fav_index=idx, fav_pickup=route["pickup"],
+                              fav_destination=route["destination"],
+                              fav_entrance=route["entrance"], fav_label=route["label"])
+        await reply.send(
+            "✏️ <b>Изменение избранного</b>\n\n"
+            f"Сейчас подача: {route['pickup']}\n"
+            "Отправьте новый адрес подачи или «-», чтобы оставить.",
+            keyboard=[[callback_button("↪️ Отмена", "passenger:favorites")]])
+
+    async def fav_edit_pickup(client, user_id, update, ctx):
+        reply = _ask(client, user_id)
+        fsm = get_context(user_id)
+        text = sanitize_input(update.message.text) if update.message else ""
+        data = await fsm.get_data()
+        if text and text != "-":
+            await fsm.update_data(fav_pickup=text)
+            data["fav_pickup"] = text
+        await fsm.set_state("passenger:fav_edit_dest")
+        await reply.send(
+            f"Куда ехать сейчас: {data.get('fav_destination') or '—'}\n"
+            "Отправьте новый адрес или «-», чтобы оставить.",
+            keyboard=[[callback_button("↪️ Отмена", "passenger:favorites")]])
+
+    async def fav_edit_dest(client, user_id, update, ctx):
+        reply = _ask(client, user_id)
+        fsm = get_context(user_id)
+        text = sanitize_input(update.message.text) if update.message else ""
+        data = await fsm.get_data()
+        if text and text != "-":
+            await fsm.update_data(fav_destination=text)
+            data["fav_destination"] = text
+        await fsm.set_state("passenger:fav_edit_entrance")
+        current = data.get("fav_entrance") or "не указан"
+        await reply.send(
+            f"Подъезд сейчас: {current}\n"
+            "Отправьте номер подъезда, «-» чтобы убрать, или «=» чтобы оставить.",
+            keyboard=[[callback_button("↪️ Отмена", "passenger:favorites")]])
+
+    async def fav_edit_entrance(client, user_id, update, ctx):
+        reply = _menu(client, user_id)
+        fsm = get_context(user_id)
+        text = sanitize_input(update.message.text) if update.message else ""
+        data = await fsm.get_data()
+        entrance = data.get("fav_entrance") or ""
+        if text == "-":
+            entrance = ""
+        elif text and text != "=":
+            entrance = text[:20]
+        try:
+            idx = int(data.get("fav_index"))
+            pickup = data.get("fav_pickup") or ""
+            destination = data.get("fav_destination") or ""
+            label = f"{pickup} → {destination}"[:80]
+            S.update_favorite(user_id, idx, pickup=pickup, destination=destination,
+                              entrance=entrance, label=label)
+        except (TypeError, ValueError) as exc:
+            await fsm.clear()
+            await reply.send(f"❌ {exc}",
+                             keyboard=[[callback_button("⭐ Избранное", "passenger:favorites")]])
+            return
+        await fsm.clear()
+        shown = storage.with_entrance(pickup, entrance)
+        await reply.send(
+            "✅ Избранное обновлено.\n\n"
+            f"📍 {shown}\n🎯 {destination}",
+            keyboard=[[callback_button("⭐ Избранное", "passenger:favorites")],
+                      [callback_button("↪️ Меню", "passenger:menu")]])
+
     router.on_callback("passenger:favorite_use:")(favorite_use)
+    router.on_callback("passenger:favorite_confirm:")(favorite_confirm)
+    router.on_callback("passenger:favorite_edit:")(favorite_edit)
+    router.on_state("passenger:fav_edit_pickup")(fav_edit_pickup)
+    router.on_state("passenger:fav_edit_dest")(fav_edit_dest)
+    router.on_state("passenger:fav_edit_entrance")(fav_edit_entrance)
 
     # --- оценить водителя после поездки ---
     async def rate_driver(client, user_id, update, ctx):

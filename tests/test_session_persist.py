@@ -28,7 +28,14 @@ class SessionPersistTests(unittest.TestCase):
     def setUp(self):
         path = str(Path(self.temp.name) / f"{self._testMethodName}.json")
         self.s = self.storage_module.Storage(path)
+        # Сохраняем прежний S, чтобы не «протекать» в другие тесты:
+        # без восстановления maximus_server.S остаётся указывать на
+        # удалённую временную базу, и последующие тесты падают.
+        self._orig_srv = self.srv.S
         self.srv.S = self.s
+
+    def tearDown(self):
+        self.srv.S = self._orig_srv
 
     def _handler(self, cookie="", path="/api/state"):
         h = MagicMock()

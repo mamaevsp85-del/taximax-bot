@@ -35,6 +35,25 @@ def request_contact_button(text: str) -> Dict[str, Any]:
     return {"type": "request_contact", "text": text}
 
 
+def contact_attachment(name: str, user_id: int, phone: str = "") -> Dict[str, Any]:
+    """Карточка человека в MAX.
+
+    contact_id — это user_id в MAX: по карточке открывается профиль и звонок
+    внутри мессенджера. Ссылки вида max.ru/id… MAX больше не открывает.
+    """
+    safe_name = " ".join(str(name or "Контакт").split())[:80] or "Контакт"
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    payload: Dict[str, Any] = {"name": safe_name, "contact_id": int(user_id)}
+    if digits:
+        payload["vcf_info"] = (
+            "BEGIN:VCARD\r\nVERSION:3.0\r\n"
+            f"FN:{safe_name}\r\n"
+            f"TEL;TYPE=cell:{digits}\r\n"
+            "END:VCARD\r\n"
+        )
+    return {"type": "contact", "payload": payload}
+
+
 def inline_keyboard(rows: Sequence[Row]) -> Dict[str, Any]:
     """Собрать вложение inline_keyboard из рядов кнопок."""
     return {

@@ -16,19 +16,66 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _callback_payloads(path: Path) -> set[str]:
-    """Литералы и префиксы payload из callback_button(...)."""
+    """Все payload'ы из вызовов callback_button(текст, payload).
+
+    Разбираем аргументы вручную, а не regex'ом: раньше шаблон «перепрыгивал»
+    через закрывающую скобку на соседние словари (TARIFF_FIELDS) и находил
+    ключи вроде "included_km" как кнопки без обработчика.
+    """
     text = path.read_text(encoding="utf-8")
     found: set[str] = set()
-    for match in re.finditer(
-        r"callback_button\(\s*(?:f)?([\"']).*?\1\s*,\s*(?:f)?([\"'])(.*?)\2",
-        text, re.S,
-    ):
-        raw = match.group(3)
-        if "{" in raw:
-            found.add(raw.split("{", 1)[0])
-        else:
-            found.add(raw)
-    return {p for p in found if p}
+    needle = "callback_button("
+
+    for m in re.finditer(re.escape(needle), text):
+        i = m.end()
+        depth = 1
+        quote = ""
+        esc = False
+        args: list[str] = []
+        cur = ""
+        # читаем аргументы до закрывающей скобки вызова
+        while i < len(text) and depth > 0:
+            ch = text[i]
+            if quote:
+                cur += ch
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == quote:
+                    quote = ""
+            elif ch in "\"'":
+                quote = ch
+                cur += ch
+            elif ch in "([{":
+                depth += 1
+                cur += ch
+            elif ch in ")]}":
+                depth -= 1
+                if depth > 0:
+                    cur += ch
+            elif ch == "," and depth == 1:
+                args.append(cur.strip())
+                cur = ""
+            else:
+                cur += ch
+            i += 1
+        args.append(cur.strip())
+        if len(args) < 2:
+            continue
+        payload = args[1]
+        # только строковые литералы; переменные (payload, back) пропускаем
+        if payload[:1] in ("f", "F"):
+            payload = payload[1:]
+        if not payload[:1] in ("\"", "'"):
+            continue
+        if len(payload) >= 2 and payload[0] in "\"'" and payload[-1] == payload[0]:
+            payload = payload[1:-1]
+        if "{" in payload:  # f-строка: оставляем только литеральный префикс
+            payload = payload.split("{", 1)[0]
+        if payload:
+            found.add(payload)
+    return found
 
 
 class RoleMenuTreeTests(unittest.IsolatedAsyncioTestCase):

@@ -62,6 +62,13 @@
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
+  function pickupLine(d) {
+    if (!d) return "";
+    var text = d.pickup || "";
+    var entrance = String(d.entrance || "").trim();
+    if (!entrance || text.toLowerCase().indexOf("подъезд") >= 0) return text;
+    return text + ", подъезд " + entrance;
+  }
   function money(n) {
     if (n == null || n === "") return "…";
     return Math.round(Number(n) || 0) + " ₽";
@@ -317,6 +324,26 @@
   function field(id, label, value, placeholder) {
     return '<label class="field"><span>' + label + '</span><input id="' + id + '" value="' + esc(value || "") + '" placeholder="' + esc(placeholder || "") + '"></label>';
   }
+  function numField(id, label, value, placeholder) {
+    var shown = value == null || value === "" ? "" : value;
+    return '<label class="field"><span>' + label + '</span><input id="' + id + '" inputmode="decimal" value="' + esc(shown) + '" placeholder="' + esc(placeholder || "") + '"></label>';
+  }
+  function tariffInputs(t) {
+    t = t || {};
+    return numField("base_price", "Посадка, ₽", t.base_price, "100") +
+      numField("included_km", "Включено км", t.included_km, "2") +
+      numField("price_per_km", "Цена за км", t.price_per_km, "20") +
+      numField("price_per_minute", "За минуту пути", t.price_per_minute, "2") +
+      numField("min_price", "Минимальная цена", t.min_price, "50");
+  }
+  function tariffBody(extra) {
+    var body = extra || {};
+    ["base_price", "included_km", "price_per_km", "price_per_minute", "min_price"].forEach(function (k) {
+      var raw = val(k);
+      if (raw !== "") body[k] = Number(raw);
+    });
+    return body;
+  }
 
   // ==================== ФОТО АВТОМОБИЛЯ (обязательно при регистрации) ====================
   // Фото можно приложить прямо здесь: выбираем файл, сжимаем на клиенте и
@@ -476,33 +503,44 @@
       var step = (draft && draft.step) || 1;
       var bars = [1, 2, 3].map(function (n) { return '<i class="' + (n <= step ? "on" : "") + '"></i>'; }).join("");
       if (step === 1) return "<h2>Адрес подачи</h2><div class=\"steps\">" + bars + "</div>" + field("pickup", "Откуда", draft && draft.pickup, "Город, улица, дом") +
+        geoBtn("pickup") +
+        field("entrance", "Подъезд", draft && draft.entrance, "номер, если есть") +
         '<button class="btn" data-act="pickup-next">Дальше</button>';
-      if (step === 2) return "<h2>Куда</h2><div class=\"steps\">" + bars + "</div><p class=\"muted\">Подача: " + esc(draft.pickup) + "</p>" +
-        field("dest", "Назначение", draft.destination, "Город, улица, дом") + '<button class="btn" data-act="dest-next">Посчитать</button>';
+      if (step === 2) return "<h2>Куда</h2><div class=\"steps\">" + bars + "</div><p class=\"muted\">Подача: " + esc(pickupLine(draft)) + "</p>" +
+        field("dest", "Назначение", draft.destination, "Город, улица, дом") + geoBtn("dest") +
+        '<button class="btn" data-act="dest-next">Посчитать</button>';
       if (draft.pending) return "<h2>Подтверждение</h2><div class=\"steps\">" + bars + "</div><div class=\"card\" style=\"margin-top:0\"><div class=\"route\">" +
         esc(draft.pickup) + "<small>" + esc(draft.destination) + "</small></div><p class=\"muted\">Считаю маршрут…</p></div>";
+      var fromFav = draft.favoriteIndex != null
+        ? '<button class="btn ghost" data-act="edit-fav" data-index="' + draft.favoriteIndex + '">Изменить адреса</button>'
+        : "";
       return "<h2>Подтверждение</h2><div class=\"steps\">" + bars + "</div><div class=\"card\" style=\"margin-top:0\"><div class=\"route\">" +
-        esc(draft.pickup) + (draft.stop ? "<small>через " + esc(draft.stop) + "</small>" : "") + "<small>" + esc(draft.destination) +
+        esc(pickupLine(draft)) + (draft.stop ? "<small>через " + esc(draft.stop) + "</small>" : "") + "<small>" + esc(draft.destination) +
         '</small></div><div class="row" style="margin-top:12px"><span class="muted">' + draft.km + " км · ~" + draft.minutes +
         ' мин</span><div class="price">' + money(draft.price) + "</div></div></div>" +
         '<button class="btn" data-act="confirm">Подтвердить заказ</button>' +
-        '<div class="btn-row"><button class="btn ghost" data-act="sheet-price">Своя цена</button><button class="btn ghost" data-act="sheet-stop">Остановка</button></div>';
+        '<button class="btn ghost" data-act="edit-route">Изменить маршрут</button>' +
+        '<div class="btn-row"><button class="btn ghost" data-act="sheet-price">Своя цена</button><button class="btn ghost" data-act="sheet-stop">Остановка</button></div>' +
+        fromFav;
     },
     live: function () {
       var o = (S.passenger.orders || []).filter(function (x) { return String(x.id) === String(picked); })[0] || S.passenger.active;
       if (!o) return "<h2>Заказ</h2><p class=\"muted\">Заказ не найден.</p>";
       var canCancel = ["pending", "accepted", "driver_arrived"].indexOf(o.status) >= 0;
+      var canEditRoute = ["pending", "accepted", "driver_arrived", "in_progress"].indexOf(o.status) >= 0;
       var isDone = ["completed", "cancelled"].indexOf(o.status) >= 0;
       var driver = o.driver_name ? '<div class="card"><b>' + esc(o.driver_name) + '</b><p class="muted">' +
         esc([o.car_model, o.car_number, o.car_color].filter(Boolean).join(" · ")) + "<br>" + esc(o.driver_phone) + "</p>" +
         '<div class="btn-row"><button class="btn ghost" data-act="sheet-chat" data-id="' + o.id + '">Написать</button>' +
-        '<button class="btn ghost" data-act="max-call" data-peer="' + esc(o.driver_id || "") + '" data-phone="' + esc(o.driver_phone) + '">📞 Позвонить</button></div></div>' : "";
+        '<button class="btn ghost" data-act="max-call" data-id="' + o.id + '" data-peer="' + esc(o.driver_id || "") + '" data-phone="' + esc(o.driver_phone) + '">📞 Позвонить через MAX</button></div></div>' : "";
       return '<div class="row"><h2 style="margin:0">Заказ #' + o.id + "</h2>" + badge(o.status) + "</div>" +
         '<div class="card"><div class="route">' + esc(o.pickup) + "<small>" + esc(o.destination) + "</small></div>" +
         '<div class="row" style="margin-top:10px"><span class="muted">' + Number(o.distance || 0).toFixed(1) +
         " км</span><b>" + money(orderPrice(o)) + "</b></div></div>" +
         (isDone ? orderDetails(o) : "") +
         driver +
+        (canEditRoute ? '<div class="btn-row"><button class="btn ghost" data-act="sheet-live-dest" data-id="' + o.id + '">Изменить адрес</button>' +
+          '<button class="btn ghost" data-act="sheet-live-stop" data-id="' + o.id + '">Добавить остановку</button></div>' : "") +
         (canCancel ? '<button class="btn ghost" data-act="sheet-price-live" data-id="' + o.id + '">Предложить свою цену</button>' +
           '<button class="btn ghost" data-act="sheet-complaint" data-id="' + o.id + '">Жалоба на авто</button>' +
           '<button class="btn danger" data-act="cancel" data-id="' + o.id + '">Отменить заказ</button>' : "") +
@@ -568,7 +606,12 @@
     favorites: function () {
       var favs = S.passenger.favorites || [];
       return "<h2>Избранное</h2>" + (favs.length ? favs.map(function (f, i) {
-        return row(f.label || "Маршрут", "", "use-fav", { index: i });
+        var sub = [f.pickup, f.destination].filter(Boolean).join(" → ");
+        if (f.entrance) sub = (f.pickup || "") + ", подъезд " + f.entrance + (f.destination ? " → " + f.destination : "");
+        return '<div class="card"><b>' + esc(f.label || "Маршрут") + "</b>" +
+          (sub ? '<p class="muted">' + esc(sub) + "</p>" : "") +
+          '<div class="btn-row"><button class="btn" data-act="use-fav" data-index="' + i + '">Заказать</button>' +
+          '<button class="btn ghost" data-act="edit-fav" data-index="' + i + '">Изменить</button></div></div>';
       }).join("") : '<p class="list-empty">Сохраните маршрут из завершённой поездки</p>');
     },
     welcome: function () {
@@ -687,15 +730,18 @@
       if (o.status === "accepted") actions = '<button class="btn" data-act="arrived" data-id="' + o.id + '">Я прибыл</button>';
       if (o.status === "driver_arrived") actions = '<button class="btn" data-act="start-trip" data-id="' + o.id + '">Начать движение</button><button class="btn ghost" data-act="wait" data-id="' + o.id + '">Ожидание</button>';
       if (o.status === "in_progress") actions = '<button class="btn" data-act="complete" data-id="' + o.id + '">Завершить поездку</button>';
+      var routeEdit = '<div class="btn-row"><button class="btn ghost" data-act="sheet-live-dest" data-id="' + o.id + '">Изменить адрес</button>' +
+        '<button class="btn ghost" data-act="sheet-live-stop" data-id="' + o.id + '">Добавить остановку</button></div>';
       return '<div class="row"><h2 style="margin:0">Рейс #' + o.id + "</h2>" + badge(o.status) + "</div>" +
         '<div class="card"><div class="route">' + esc(o.pickup) + "<small>" + esc(o.destination) + "</small></div>" +
         '<p class="muted">Пассажир ' + esc(o.passenger_name) + " · " + esc(o.passenger_phone) + "</p><b>" + money(o.price) + "</b></div>" +
+        routeEdit +
         actions +
         '<div class="btn-row">' +
           '<button class="btn ghost" data-act="nav" data-q="' + esc(o.status === "in_progress" ? o.destination : o.pickup) + '">Навигация</button>' +
           '<button class="btn ghost" data-act="sheet-chat" data-id="' + o.id + '">Написать</button>' +
         '</div>' +
-        '<button class="btn ghost" data-act="max-call" data-peer="' + esc(o.passenger_id || "") + '" data-phone="' + esc(o.passenger_phone || "") + '">📞 Позвонить через MAX</button>' +
+        '<button class="btn ghost" data-act="max-call" data-id="' + o.id + '" data-peer="' + esc(o.passenger_id || "") + '" data-phone="' + esc(o.passenger_phone || "") + '">📞 Позвонить через MAX</button>' +
         (["accepted", "driver_arrived", "in_progress", "pending"].indexOf(o.status) >= 0 ? '<button class="btn danger" data-act="d-cancel" data-id="' + o.id + '">Отменить заказ</button>' : "");
     },
     "d-profile": function () {
@@ -811,7 +857,8 @@
         '<button class="btn ghost" data-act="adm" data-op="admin.unlim" data-id="' + d.user_id + '">Безлимит</button></div>' +
         '<button class="btn ghost" data-act="adm" data-op="admin.resetacc" data-id="' + d.user_id + '">Обнулить доступ</button>' +
         '<button class="btn ghost" data-act="sheet-admin-balance" data-id="' + d.user_id + '">Пополнить баланс</button>' +
-        '<button class="btn danger" data-act="adm" data-op="admin.delete" data-id="' + d.user_id + '">Удалить</button>';
+        '<button class="btn ghost" data-act="edit-person" data-kind="driver" data-id="' + d.user_id + '">Изменить</button>' +
+        '<button class="btn danger" data-act="adm-delete" data-kind="driver" data-id="' + d.user_id + '" data-name="' + esc(d.name) + '">Удалить</button>';
     },
     "a-moderation": function () {
       var list = S.admin.pending || [];
@@ -833,18 +880,43 @@
         (o.complaint ? '<p class="note">Жалоба: ' + esc(o.complaint) + "</p>" : "");
     },
     "a-passengers": function () {
-      return "<h2>Пассажиры</h2>" + (S.admin.passengers || []).map(function (p) {
-        return '<div class="card"><b>' + esc(p.name) + '</b><p class="muted">' + esc(p.phone) + " · заказов " + p.orders_count +
-          " · " + money(p.total_spent) + '</p><button class="btn ghost" data-act="adm" data-op="admin.passenger.block" data-id="' +
-          p.user_id + '" data-minutes="60">Блок 1 ч</button></div>';
-      }).join("");
+      var list = S.admin.passengers || [];
+      return "<h2>Пассажиры</h2>" + (list.length ? list.map(function (p) {
+        return row(p.name, (p.phone || "без телефона") + " · заказов " + p.orders_count, "a-open-pass", { id: p.user_id });
+      }).join("") : '<p class="list-empty">Пассажиров нет</p>');
+    },
+    "a-passenger": function () {
+      var p = (S.admin.passengers || []).filter(function (x) { return String(x.user_id) === String(picked); })[0];
+      if (!p) return "<h2>Пассажир</h2><p class=\"muted\">Не найден.</p>";
+      return "<h2>" + esc(p.name) + "</h2><p class=\"muted\">" + esc(p.phone || "телефон не указан") +
+        "<br>Заказов " + p.orders_count + " · потрачено " + money(p.total_spent) +
+        (p.is_blocked ? "<br>Заблокирован" : "") + "</p>" +
+        '<button class="btn ghost" data-act="edit-person" data-kind="passenger" data-id="' + p.user_id + '">Изменить</button>' +
+        '<div class="btn-row"><button class="btn ghost" data-act="adm" data-op="admin.passenger.block" data-id="' + p.user_id + '" data-minutes="60">Блок 1 ч</button>' +
+        '<button class="btn ghost" data-act="adm" data-op="admin.passenger.unblock" data-id="' + p.user_id + '">Разблокировать</button></div>' +
+        '<button class="btn danger" data-act="adm-delete" data-kind="passenger" data-id="' + p.user_id + '" data-name="' + esc(p.name) + '">Удалить</button>' +
+        '<button class="btn ghost" data-act="tab" data-screen="a-passengers">К списку</button>';
     },
     "a-tariffs": function () {
       var cities = S.admin.tariffs || {};
-      return "<h2>Тарифы</h2>" + Object.keys(cities).map(function (c) {
-        return '<div class="doc"><span>' + esc(c) + "</span><b>" + (cities[c].price_per_km || "") + " ₽/км</b></div>";
-      }).join("") + field("city", "Город", "", "Абакан") + field("ppk", "Цена за км", "", "35") +
-        '<button class="btn" data-act="save-tariff">Сохранить тариф</button>';
+      var ic = S.admin.intercity || {};
+      var list = Object.keys(cities).map(function (c) {
+        var t = cities[c] || {};
+        return '<div class="card"><b>' + esc(c) + '</b><p class="muted">посадка ' +
+          esc(t.base_price != null ? t.base_price : "—") + " ₽ · " +
+          esc(t.price_per_km != null ? t.price_per_km : "—") + " ₽/км · мин. " +
+          esc(t.min_price != null ? t.min_price : "—") + ' ₽</p><div class="btn-row">' +
+          '<button class="btn ghost" data-act="edit-tariff" data-city="' + esc(c) + '">Изменить</button>' +
+          '<button class="btn danger" data-act="delete-tariff" data-city="' + esc(c) + '">Удалить</button></div></div>';
+      }).join("");
+      return "<h2>Тарифы</h2>" +
+        '<div class="card"><b>Межгород</b><p class="muted">Город подачи и город назначения разные<br>посадка ' +
+        esc(ic.base_price != null ? ic.base_price : "—") + " ₽ · " +
+        esc(ic.price_per_km != null ? ic.price_per_km : "—") + " ₽/км · мин. " +
+        esc(ic.min_price != null ? ic.min_price : "—") + ' ₽</p>' +
+        '<button class="btn ghost" data-act="edit-intercity">Изменить межгород</button></div>' +
+        (list || '<p class="list-empty">Городских тарифов пока нет</p>') +
+        '<button class="btn" data-act="edit-tariff">Добавить город</button>';
     },
     "a-stats": function () {
       var done = (S.admin.orders || []).filter(function (o) { return o.status === "completed"; }).length;
@@ -969,6 +1041,185 @@
   var _suggestTimer = null;
   var _suggestSeq = 0;
 
+  function geoBtn(fieldId) {
+    return '<button type="button" class="btn ghost geo-btn" data-act="my-geo" data-field="' + fieldId + '">Моё место</button>';
+  }
+
+  var _geoPoints = {};
+
+  function clearGeoPoint(inputId) {
+    delete _geoPoints[inputId];
+    if (!draft) return;
+    if (inputId === "pickup") draft.pickup_coords = null;
+    if (inputId === "dest") {
+      draft.dest_coords = null;
+      draft.destination_coords = null;
+    }
+  }
+
+  function putGeoAddress(inputId, res) {
+    var address = (res && res.address) || "";
+    if (!address) { toast("Адрес по точке не найден"); return; }
+    var point = { lat: res.lat, lon: res.lon };
+    _geoPoints[inputId] = point;
+    if (!draft) draft = { step: 1 };
+    if (inputId === "dest" || inputId === "newdest" || inputId === "fdest") {
+      draft.destination = address;
+      draft.dest_coords = point;
+      draft.destination_coords = point;
+      if (res.city) draft.destination_city = res.city;
+    } else if (inputId === "stop" || inputId === "newstop") {
+      draft.stop = address;
+    } else {
+      draft.pickup = address;
+      draft.pickup_coords = point;
+      if (res.city) draft.pickup_city = res.city;
+      if (!draft.step) draft.step = 1;
+    }
+    if (screen !== "trip" && (inputId === "pickup" || inputId === "dest")) {
+      screen = "trip";
+    }
+    render();
+    var input = document.getElementById(inputId);
+    if (input) input.value = address;
+    toast("Адрес подставлен");
+  }
+
+  function mapStart() {
+    var u = (S && S.user) || {};
+    var lat = Number(u.lat);
+    var lon = Number(u.lon);
+    if (lat && lon) return { lat: lat, lon: lon };
+    var city = String(u.home_city || "").toLowerCase();
+    var known = {
+      "черногорск": [53.8236, 91.2836],
+      "абакан": [53.7212, 91.4424],
+      "минусинск": [53.7103, 91.6872],
+      "саяногорск": [53.0896, 91.4122],
+      "красноярск": [56.0153, 92.8932]
+    };
+    var point = known[city] || known["черногорск"];
+    return { lat: point[0], lon: point[1] };
+  }
+
+  function mountGeoMap(root, lat, lon) {
+    var z = 16;
+    var worldX = 0;
+    var worldY = 0;
+    var moved = false;
+
+    function lonToX(value, zoom) {
+      return (value + 180) / 360 * Math.pow(2, zoom);
+    }
+    function latToY(value, zoom) {
+      var rad = value * Math.PI / 180;
+      var n = Math.log(Math.tan(rad) + 1 / Math.cos(rad));
+      return (1 - n / Math.PI) / 2 * Math.pow(2, zoom);
+    }
+    function xToLon(value, zoom) {
+      return value / Math.pow(2, zoom) * 360 - 180;
+    }
+    function yToLat(value, zoom) {
+      var n = Math.PI - 2 * Math.PI * value / Math.pow(2, zoom);
+      return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+    }
+    function setCenter(nextLat, nextLon) {
+      worldX = lonToX(nextLon, z) * 256;
+      worldY = latToY(nextLat, z) * 256;
+      draw();
+    }
+    function draw() {
+      var old = root.querySelectorAll("img");
+      for (var i = 0; i < old.length; i++) old[i].remove();
+      var rect = root.getBoundingClientRect();
+      var w = rect.width || 300;
+      var h = rect.height || 280;
+      var n = Math.pow(2, z);
+      var leftTile = Math.floor((worldX - w / 2) / 256) - 1;
+      var rightTile = Math.floor((worldX + w / 2) / 256) + 1;
+      var topTile = Math.floor((worldY - h / 2) / 256) - 1;
+      var bottomTile = Math.floor((worldY + h / 2) / 256) + 1;
+      for (var tx = leftTile; tx <= rightTile; tx++) {
+        for (var ty = topTile; ty <= bottomTile; ty++) {
+          if (ty < 0 || ty >= n) continue;
+          var img = document.createElement("img");
+          var wrapped = ((tx % n) + n) % n;
+          img.alt = "";
+          img.src = "https://tile.openstreetmap.org/" + z + "/" + wrapped + "/" + ty + ".png";
+          img.style.left = (tx * 256 - worldX + w / 2) + "px";
+          img.style.top = (ty * 256 - worldY + h / 2) + "px";
+          root.appendChild(img);
+        }
+      }
+      window._mapCenter = {
+        lat: yToLat(worldY / 256, z),
+        lon: xToLon(worldX / 256, z)
+      };
+    }
+    setCenter(lat, lon);
+    var drag = null;
+    root.addEventListener("pointerdown", function (e) {
+      if (e.target.closest("button")) return;
+      drag = { x: e.clientX, y: e.clientY, wx: worldX, wy: worldY };
+      root.setPointerCapture(e.pointerId);
+    });
+    root.addEventListener("pointermove", function (e) {
+      if (!drag) return;
+      worldX = drag.wx - (e.clientX - drag.x);
+      worldY = drag.wy - (e.clientY - drag.y);
+      moved = true;
+      draw();
+    });
+    root.addEventListener("pointerup", function () { drag = null; });
+    root.addEventListener("pointercancel", function () { drag = null; });
+    window._geoMap = {
+      zoom: function (delta) {
+        var center = window._mapCenter;
+        z = Math.max(13, Math.min(18, z + delta));
+        setCenter(center.lat, center.lon);
+      }
+    };
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(function (pos) {
+        if (moved) return;
+        setCenter(pos.coords.latitude, pos.coords.longitude);
+      }, function () {}, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+    }
+  }
+
+  function openGeoMap(inputId) {
+    window._geoField = inputId;
+    var start = mapStart();
+    sheet("<h2>Где вы</h2><p class=\"muted\">Сдвиньте карту, чтобы метка стояла на доме.</p>" +
+      '<div class="geo-map" id="geomap"><i class="geo-pin"></i>' +
+      '<div class="geo-zoom"><button type="button" data-act="geo-zoom" data-z="1">+</button>' +
+      '<button type="button" data-act="geo-zoom" data-z="-1">−</button></div></div>' +
+      '<p class="geo-copy">© OpenStreetMap</p>' +
+      '<button class="btn" data-act="geo-map-ok">Подставить адрес</button>');
+    mountGeoMap(document.getElementById("geomap"), start.lat, start.lon);
+  }
+
+  function useMyLocation(inputId) {
+    window._geoField = inputId;
+    if (!navigator.geolocation) {
+      openGeoMap(inputId);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      api("/api/act", { op: "geo.resolve", lat: pos.coords.latitude, lon: pos.coords.longitude }).then(function (res) {
+        putGeoAddress(inputId, res);
+      }).catch(function () { openGeoMap(inputId); });
+    }, function () {
+      openGeoMap(inputId);
+    }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+  }
+
+  function fullAddress(it) {
+    if (!it) return "";
+    if (it.address) return String(it.address).trim();
+    return [it.title, it.subtitle].filter(Boolean).join(", ");
+  }
+
   function attachSuggest(inputId, onPick, opts) {
     var input = document.getElementById(inputId);
     if (!input) return;
@@ -990,8 +1241,7 @@
                  : it.kind === "street" ? "\uD83D\uDEE3"
                  : "\uD83D\uDCCD";
         html += '<button type="button" class="suggest-item" data-i="' + i + '">' +
-          "<i>" + icon + "</i><span><b>" + esc(it.title) + "</b>" +
-          "<small>" + esc(it.subtitle || it.address) + "</small></span></button>";
+          "<i>" + icon + "</i><span>" + esc(fullAddress(it)) + "</span></button>";
       }
       box.innerHTML = html;
       box.hidden = false;
@@ -1002,7 +1252,8 @@
           btn.addEventListener("click", function (e) {
             e.preventDefault();
             var it = items[Number(btn.dataset.i)];
-            input.value = it.title + (it.subtitle ? ", " + it.subtitle.split(",")[0] : "");
+            input.value = fullAddress(it);
+            clearGeoPoint(inputId);
             hide();
             if (onPick) onPick(it);
           });
@@ -1025,6 +1276,7 @@
     }
 
     input.addEventListener("input", function () {
+      clearGeoPoint(inputId);
       var q = input.value.trim();
       clearTimeout(_suggestTimer);
       if (q.length < 2) { hide(); return; }
@@ -1085,13 +1337,9 @@
     if (screen === "trip") {
       var step = (draft && draft.step) || 1;
       if (step === 1) {
-        attachSuggest("pickup", function (it) {
-          draft.pickup = it.title + (it.subtitle ? ", " + it.subtitle.split(",")[0] : "");
-        });
+        attachSuggest("pickup", function (it) { draft.pickup = fullAddress(it); });
       } else if (step === 2) {
-        attachSuggest("dest", function (it) {
-          draft.destination = it.title + (it.subtitle ? ", " + it.subtitle.split(",")[0] : "");
-        });
+        attachSuggest("dest", function (it) { draft.destination = fullAddress(it); });
       }
     }
     if (screen === "d-current") {
@@ -1140,6 +1388,21 @@
         if (data.state) { S = normalizeState(data.state); screen = entryScreen(); render(); }
       }).catch(function (e) { toast(e.message); });
     },
+    "my-geo": function (el) {
+      useMyLocation(el.dataset.field || "pickup");
+    },
+    "geo-zoom": function (el) {
+      if (window._geoMap) window._geoMap.zoom(Number(el.dataset.z) || 1);
+    },
+    "geo-map-ok": function () {
+      var center = window._mapCenter;
+      var field = window._geoField || "pickup";
+      if (!center) return;
+      api("/api/act", { op: "geo.resolve", lat: center.lat, lon: center.lon }).then(function (res) {
+        closeSheet();
+        putGeoAddress(field, res);
+      }).catch(function (e) { toast(e.message || "Адрес не найден"); });
+    },
     start: function () {
       if (needOnboarding()) {
         window._onbStep = 1;
@@ -1154,6 +1417,7 @@
       var pickup = val("pickup");
       if (pickup.length < 3) { toast("Укажите адрес"); return; }
       draft.pickup = pickup;
+      draft.entrance = val("entrance");
       draft.step = 2;
       render();
     },
@@ -1164,33 +1428,70 @@
       draft.destination = dest;
       draft.step = 3;
       draft.pending = true;
+      var entrance = draft.entrance || "";
+      var favIndex = draft.favoriteIndex;
       render();
       api("/api/act", {
         op: "quote",
         pickup: draft.pickup,
         destination: dest,
         stop: draft.stop || "",
-        pickup_coords: draft.pickup_coords || null
+        pickup_coords: draft.pickup_coords || null,
+        dest_coords: draft.dest_coords || draft.destination_coords || null
       }).then(function (data) {
-        draft = data.draft; draft.step = 3; draft.pending = false; render();
+        draft = data.draft; draft.step = 3; draft.pending = false;
+        draft.entrance = entrance;
+        if (favIndex != null) draft.favoriteIndex = favIndex;
+        render();
       }).catch(function (e) { draft.step = 2; draft.pending = false; toast(e.message); render(); });
     },
-    "sheet-price": function () { sheet("<h2>Своя цена</h2>" + field("own", "Сумма", draft.price, "220") + '<button class="btn" data-act="apply-price">Поставить</button>'); },
+    "sheet-price": function () {
+      var base = (draft && draft.calc_price) ? Number(draft.calc_price) : (draft ? Number(draft.price) || 0 : 0);
+      sheet("<h2>Своя цена</h2><p class=\"muted\">Только больше рассчитанной: " + money(base) + "</p>" +
+        field("own", "Сумма", "", (base ? base + 1 : 220)) + '<button class="btn" data-act="apply-price">Поставить</button>');
+    },
     "apply-price": function () {
       var n = Number(val("own"));
-      if (n < 50) { toast("Минимум 50 ₽"); return; }
+      if (!n || isNaN(n) || n <= 0) { toast("Введите сумму"); return; }
+      // Запоминаем рассчитанную стоимость при первом изменении цены
+      if (draft && !draft.calc_price) draft.calc_price = Number(draft.price) || 0;
+      var base = (draft && draft.calc_price) ? Number(draft.calc_price) : 0;
+      if (base > 0 && n <= base) { toast("Своя цена должна быть больше рассчитанной: " + base + " ₽"); return; }
+      if (base <= 0 && n < 50) { toast("Минимум 50 ₽"); return; }
       draft.price = n; closeSheet(); render();
     },
-    "sheet-stop": function () { sheet("<h2>Остановка</h2>" + field("stop", "Адрес", draft.stop || "", "") + '<button class="btn" data-act="apply-stop">Пересчитать</button>'); },
+    "sheet-stop": function () {
+      sheet("<h2>Остановка</h2>" + field("stop", "Адрес", draft.stop || "", "Город, улица, дом") +
+        geoBtn("stop") + '<button class="btn" data-act="apply-stop">Пересчитать</button>');
+      attachSuggest("stop", function (it) {
+        var input = document.getElementById("stop");
+        if (input) input.value = fullAddress(it);
+      });
+    },
     "apply-stop": function () {
       var stop = val("stop");
       closeSheet();
       draft.stop = stop;
       draft.pending = true;
+      var entrance = draft.entrance || "";
+      var favIndex = draft.favoriteIndex;
       render();
-      api("/api/act", { op: "quote", pickup: draft.pickup, destination: draft.destination, stop: stop }).then(function (data) {
-        draft = data.draft; draft.step = 3; draft.pending = false; render();
+      api("/api/act", {
+        op: "quote", pickup: draft.pickup, destination: draft.destination, stop: stop,
+        pickup_coords: draft.pickup_coords || null,
+        dest_coords: draft.dest_coords || draft.destination_coords || null
+      }).then(function (data) {
+        draft = data.draft; draft.step = 3; draft.pending = false;
+        draft.entrance = entrance;
+        if (favIndex != null) draft.favoriteIndex = favIndex;
+        render();
       }).catch(function (e) { draft.pending = false; toast(e.message); render(); });
+    },
+    "edit-route": function () {
+      if (!draft) return;
+      draft.step = 1;
+      draft.pending = false;
+      render();
     },
     confirm: async function () {
       var ok = await run({ op: "order.create", draft: draft, price: draft.price });
@@ -1215,12 +1516,76 @@
         render();
       });
     },
-    "sheet-price-live": function (el) { sheet("<h2>Своя цена</h2>" + field("own", "Сумма", "", "220") + '<button class="btn" data-act="save-live-price" data-id="' + el.dataset.id + '">Сохранить</button>'); },
-    "save-live-price": function (el) { closeSheet(); run({ op: "order.price", id: Number(el.dataset.id), price: Number(val("own")) }); },
+    "sheet-live-dest": function (el) {
+      var o = orderById(Number(el.dataset.id)) || (S.driver && S.driver.current) || {};
+      sheet("<h2>Новый адрес</h2><p class=\"muted\">Куда ехать вместо текущего адреса.</p>" +
+        field("newdest", "Куда", o.destination || "", "Город, улица, дом") +
+        geoBtn("newdest") +
+        '<button class="btn" data-act="save-live-dest" data-id="' + el.dataset.id + '">Пересчитать</button>');
+      attachSuggest("newdest", function (it) {
+        var input = document.getElementById("newdest");
+        if (input) input.value = fullAddress(it);
+      });
+    },
+    "save-live-dest": function (el) {
+      var dest = val("newdest");
+      if (dest.length < 3) { toast("Укажите адрес"); return; }
+      var point = _geoPoints.newdest || null;
+      closeSheet();
+      run({ op: "order.route", id: Number(el.dataset.id), destination: dest, destination_coords: point });
+    },
+    "sheet-live-stop": function (el) {
+      sheet("<h2>Остановка</h2>" + field("newstop", "Адрес остановки", "", "Город, улица, дом") +
+        geoBtn("newstop") +
+        '<button class="btn" data-act="save-live-stop" data-id="' + el.dataset.id + '">Добавить</button>');
+      attachSuggest("newstop", function (it) {
+        var input = document.getElementById("newstop");
+        if (input) input.value = fullAddress(it);
+      });
+    },
+    "save-live-stop": function (el) {
+      var stop = val("newstop");
+      if (stop.length < 3) { toast("Укажите остановку"); return; }
+      var o = orderById(Number(el.dataset.id)) || (S.driver && S.driver.current) || {};
+      closeSheet();
+      run({ op: "order.route", id: Number(el.dataset.id), destination: o.destination || "", stop: stop });
+    },
+    "sheet-price-live": function (el) {
+      var oid = Number(el.dataset.id);
+      var o = orderById(oid);
+      var base = (o && o.base_price) ? Number(o.base_price) : (o ? Number(o.price) || 0 : 0);
+      sheet("<h2>Своя цена</h2><p class=\"muted\">Только больше рассчитанной: " + money(base) + "</p>" +
+        field("own", "Сумма", "", (base ? base + 1 : 220)) + '<button class="btn" data-act="save-live-price" data-id="' + el.dataset.id + '">Сохранить</button>');
+    },
+    "save-live-price": function (el) {
+      var oid = Number(el.dataset.id);
+      var n = Number(val("own"));
+      if (!n || isNaN(n) || n <= 0) { toast("Введите сумму"); return; }
+      var o = orderById(oid);
+      var base = (o && o.base_price) ? Number(o.base_price) : (o ? Number(o.price) || 0 : 0);
+      if (base > 0 && n <= base) { toast("Своя цена должна быть больше рассчитанной: " + base + " ₽"); return; }
+      closeSheet();
+      run({ op: "order.price", id: oid, price: n });
+    },
     "sheet-complaint": function (el) { sheet("<h2>Жалоба</h2>" + field("complaint", "Что не совпало", "", "номер, цвет, водитель") + '<button class="btn" data-act="save-complaint" data-id="' + el.dataset.id + '">Отправить</button>'); },
     "save-complaint": function (el) { closeSheet(); run({ op: "order.complaint", id: Number(el.dataset.id), text: val("complaint") }); },
     "fav-add": function (el) { run({ op: "favorite.add", id: Number(el.dataset.id) }).then(function () { toast("В избранном"); }); },
-    "use-fav": function (el) { run({ op: "favorite.use", index: Number(el.dataset.index) }); },
+    "use-fav": function (el) {
+      var index = Number(el.dataset.index);
+      api("/api/act", { op: "favorite.preview", index: index }).then(function (data) {
+        if (!data || !data.draft || !data.draft.pickup) {
+          toast("Маршрут не найден");
+          return;
+        }
+        draft = data.draft;
+        draft.step = 3;
+        draft.pending = false;
+        draft.favoriteIndex = index;
+        draft.calc_price = Number(draft.price) || 0;
+        screen = "trip";
+        render();
+      }).catch(function (e) { toast(e.message || "Не удалось открыть маршрут"); });
+    },
     "to-rate": function (el) { picked = Number(el.dataset.id); window._star = 0; go("rate"); },
     star: function (el) { window._star = Number(el.dataset.n); render(); },
     "save-rate": function () {
@@ -1248,48 +1613,83 @@
       render();
     },
     "go-receipt": function () { go("receipt"); },
+    "edit-fav": function (el) {
+      var index = Number(el.dataset.index);
+      api("/api/act", { op: "favorite.preview", index: index }).then(function (data) {
+        var d = (data && data.draft) || {};
+        var fav = ((S.passenger && S.passenger.favorites) || [])[index] || {};
+        sheet("<h2>Избранный заказ</h2>" +
+          field("fpickup", "Откуда", d.pickup || fav.pickup || "", "Город, улица, дом") +
+          geoBtn("fpickup") +
+          field("fentrance", "Подъезд", d.entrance || fav.entrance || "", "номер") +
+          field("fdest", "Куда", d.destination || fav.destination || "", "Город, улица, дом") +
+          geoBtn("fdest") +
+          field("flabel", "Название", d.label || fav.label || "", "Дом → Работа") +
+          '<button class="btn" data-act="save-fav" data-index="' + index + '">Сохранить</button>');
+        attachSuggest("fpickup", null);
+        attachSuggest("fdest", null);
+      }).catch(function (e) { toast(e.message || "Не удалось открыть"); });
+    },
+    "save-fav": function (el) {
+      var index = Number(el.dataset.index);
+      var pickup = val("fpickup");
+      var destination = val("fdest");
+      if (pickup.length < 3 || destination.length < 3) { toast("Укажите оба адреса"); return; }
+      closeSheet();
+      run({
+        op: "favorite.edit", index: index, pickup: pickup, destination: destination,
+        entrance: val("fentrance"), label: val("flabel")
+      }).then(function (ok) {
+        if (!ok || screen !== "trip") return;
+        api("/api/act", { op: "favorite.preview", index: index }).then(function (data) {
+          draft = data.draft;
+          draft.step = 3;
+          draft.pending = false;
+          draft.favoriteIndex = index;
+          draft.calc_price = Number(draft.price) || 0;
+          render();
+        }).catch(function (e) { toast(e.message); });
+      });
+    },
     "sheet-chat": function (el) {
       picked = Number(el.dataset.id);
       var pool = [].concat((S.passenger && S.passenger.orders) || [], (S.driver && S.driver.current) ? [S.driver.current] : [], (S.admin && S.admin.orders) || []);
-      var o = pool.filter(function (x) { return x && x.id === picked; })[0] || {};
+      var o = pool.filter(function (x) { return x && String(x.id) === String(picked); })[0] || {};
+      var mine = S && S.user ? String(S.user.id) : "";
+      var title = (S && S.user && S.user.role === "driver") ? "Диалог с пассажиром" : "Диалог с водителем";
       var bubbles = (o.chat || []).map(function (m) {
-        return '<div class="bubble' + (m.from === S.user.id ? " me" : "") + '">' + esc(m.text) + "</div>";
+        return '<div class="bubble' + (String(m.from) === mine ? " me" : "") + '">' + esc(m.text) + "</div>";
       }).join("");
-      sheet("<h2>Сообщения</h2><div class=\"chat\">" + (bubbles || '<p class="muted">Пока пусто</p>') + "</div>" +
+      sheet("<h2>" + title + "</h2><div class=\"chat\">" + (bubbles || '<p class="muted">Пока пусто</p>') + "</div>" +
         field("msg", "Текст", "", "") + '<button class="btn" data-act="send-msg" data-id="' + picked + '">Отправить</button>');
     },
     "send-msg": function (el) { closeSheet(); run({ op: "order.chat", id: Number(el.dataset.id), text: val("msg") }); },
     "max-chat": function (el) {
-      // Связь через чат MAX: открываем диалог с собеседником
-      var id = Number(el.dataset.id);
-      var pool = [].concat(
-        (S.passenger && S.passenger.orders) || [],
-        (S.driver && S.driver.current) ? [S.driver.current] : [],
-        (S.admin && S.admin.orders) || []
-      );
-      var o = pool.filter(function (x) { return x && x.id === id; })[0] || {};
-      var peer = (S.user.role === "driver") ? o.passenger_id : o.driver_id;
-      if (!peer) { toast("Собеседник не найден"); return; }
-      var link = "https://max.ru/id" + peer;
-      window.Maximus.openBotChat ? window.Maximus.openBotChat(link) : window.Maximus.openLink(link);
+      // Связь через приложение: открываем переписку внутри заказа.
+      // Внешняя ссылка на профиль MAX (https://max.ru/id<uid>) устарела —
+      // MAX её не открывает («ссылка устарела»).
+      actions["sheet-chat"] && actions["sheet-chat"](el);
     },
     "max-call": function (el) {
-      // Звонок через MAX: открываем профиль собеседника в мессенджере,
-      // оттуда доступен встроенный звонок MAX
-      var peer = el.dataset.peer || "";
+      // max.ru/id… MAX открывает как «ссылка устарела». Карточка контакта
+      // уходит в чат с ботом: по ней звонок идёт уже внутри MAX.
+      var id = Number(el.dataset.id || picked || 0);
       var phone = el.dataset.phone || "";
-      if (peer) {
-        var link = "https://max.ru/id" + peer;
-        if (window.Maximus.openBotChat) window.Maximus.openBotChat(link);
-        else window.Maximus.openLink(link);
-        return;
-      }
-      if (phone) {
+      run({ op: "order.call", id: id }).then(function (ok) {
+        if (ok) {
+          toast("Карточка в чате с ботом — нажмите её и позвоните");
+          var link = (S.user && S.user.bot_link) || "";
+          if (link && window.Maximus.openBotChat) window.Maximus.openBotChat(link);
+          return;
+        }
         var clean = String(phone).replace(/[^\d+]/g, "");
-        window.Maximus.openLink("tel:" + clean);
-        return;
-      }
-      toast("Нет данных для звонка");
+        if (!clean) { toast("Номер телефона не указан"); return; }
+        var a = document.createElement("a");
+        a.href = "tel:" + clean;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      });
     },
     call: function (el) {
       var phone = el.dataset.phone || "";
@@ -1423,6 +1823,47 @@
     help: function () { toast("Линия, список, текущий рейс и профиль — как в боте"); },
     nav: function (el) { window.Maximus.openLink("https://yandex.ru/maps/?text=" + encodeURIComponent(el.dataset.q || "")); },
     "a-open": function (el) { picked = el.dataset.id; go("a-driver"); },
+    "a-open-pass": function (el) { picked = el.dataset.id; go("a-passenger"); },
+    "edit-person": function (el) {
+      var id = el.dataset.id;
+      var kind = el.dataset.kind;
+      var list = kind === "driver" ? (S.admin.drivers || []) : (S.admin.passengers || []);
+      var person = list.filter(function (x) { return String(x.user_id) === String(id); })[0];
+      if (!person) { toast("Не найден"); return; }
+      var html = "<h2>Изменить</h2>" +
+        field("pname", "Имя", person.name, "") +
+        field("pphone", "Телефон", person.phone, "");
+      if (kind === "driver") {
+        html += field("pmodel", "Модель", person.car_model, "") +
+          field("pnumber", "Номер", person.car_number, "") +
+          field("pcolor", "Цвет", person.car_color, "");
+      }
+      html += '<button class="btn" data-act="save-person" data-id="' + id + '" data-kind="' + kind + '">Сохранить</button>';
+      sheet(html);
+    },
+    "save-person": function (el) {
+      var name = val("pname");
+      if (!name) { toast("Укажите имя"); return; }
+      var body = { op: "admin.user.edit", id: Number(el.dataset.id), name: name, phone: val("pphone") };
+      if (el.dataset.kind === "driver") {
+        body.car_model = val("pmodel");
+        body.car_number = val("pnumber");
+        body.car_color = val("pcolor");
+      }
+      closeSheet();
+      run(body);
+    },
+    "adm-delete": function (el) {
+      var kind = el.dataset.kind === "passenger" ? "пассажира" : "водителя";
+      var name = el.dataset.name || "";
+      if (!window.confirm("Удалить " + kind + (name ? " «" + name + "»" : "") + "?")) return;
+      var back = el.dataset.kind === "passenger" ? "a-passengers" : "a-drivers";
+      run({ op: "admin.delete", id: Number(el.dataset.id) }).then(function (ok) {
+        if (!ok) return;
+        screen = back;
+        render();
+      });
+    },
     "a-order": function (el) { picked = el.dataset.id; go("a-order"); },
     adm: function (el) {
       var body = { op: el.dataset.op, id: Number(el.dataset.id) };
@@ -1444,7 +1885,35 @@
     "admin-balance": function (el) { closeSheet(); run({ op: "admin.balance", id: Number(el.dataset.id), amount: Number(val("amount")) }); },
     "sheet-admin-price": function (el) { sheet("<h2>Цена заказа</h2>" + field("amount", "Новая цена", "", "") + '<button class="btn" data-act="admin-price" data-id="' + el.dataset.id + '">Сохранить</button>'); },
     "admin-price": function (el) { closeSheet(); run({ op: "admin.order.price", id: Number(el.dataset.id), price: Number(val("amount")) }); },
-    "save-tariff": function () { run({ op: "admin.tariff", city: val("city"), price_per_km: Number(val("ppk")) }); },
+    "edit-tariff": function (el) {
+      var city = (el && el.dataset && el.dataset.city) || "";
+      var t = city && S.admin && S.admin.tariffs ? S.admin.tariffs[city] : null;
+      sheet("<h2>" + (city ? "Тариф: " + esc(city) : "Новый город") + "</h2>" +
+        (city ? '<input id="city" type="hidden" value="' + esc(city) + '">' : field("city", "Город", "", "Абакан")) +
+        tariffInputs(t) +
+        '<button class="btn" data-act="save-tariff">Сохранить</button>');
+    },
+    "save-tariff": function () {
+      var city = val("city");
+      if (!city) { toast("Укажите город"); return; }
+      closeSheet();
+      run(tariffBody({ op: "admin.tariff", city: city }));
+    },
+    "delete-tariff": function (el) {
+      var city = el.dataset.city || "";
+      if (!city || !window.confirm("Удалить тариф города «" + city + "»?")) return;
+      run({ op: "admin.tariff.delete", city: city });
+    },
+    "edit-intercity": function () {
+      var t = (S.admin && S.admin.intercity) || {};
+      sheet("<h2>Межгород</h2><p class=\"muted\">Считается, когда город подачи и город назначения разные.</p>" +
+        tariffInputs(t) +
+        '<button class="btn" data-act="save-intercity">Сохранить</button>');
+    },
+    "save-intercity": function () {
+      closeSheet();
+      run(tariffBody({ op: "admin.tariff.intercity" }));
+    },
     "add-manager": function () { run({ op: "admin.manager.add", id: Number(val("mid")) }); },
     "add-admin": function () { run({ op: "admin.admin.add", phone: val("aphone") }); },
     "save-content": function () { run({ op: "admin.content", passenger: val("wp"), driver: val("wd"), support: val("ws") }); },
@@ -1493,8 +1962,7 @@
       showPeople();
       setTimeout(hideSplash, 300);
     });
-    return;
-  }
+  } else {
 
   if (!maxUser && urlUid) {
     maxUser = { id: Number(urlUid), name: urlParams.get('name') || '', username: '', photo: '' };
@@ -1566,6 +2034,7 @@
     }
     doLogin(fallbackId, (maxUser && maxUser.name) || "");
   });
+  }
 
   function doLogin(uid, name) {
     api("/api/act", { op: "login", max_id: uid, name: name }).then(function (data) {
@@ -1666,13 +2135,72 @@
     cancelled: "Заказ отменён"
   };
 
-  function showBanner(text, kind) {
+  var _chatSeen = {};
+
+  function openDialog(orderId) {
+    picked = Number(orderId);
+    var role = S && S.user && S.user.role;
+    screen = role === "driver" ? "d-current" : "live";
+    render();
+    if (actions["sheet-chat"]) actions["sheet-chat"]({ dataset: { id: String(orderId) } });
+  }
+
+  function checkIncomingChat(norm) {
+    if (!norm || !norm.user) return;
+    var me = String(norm.user.id || "");
+    var role = norm.user.role;
+    var orders = [];
+    if (role === "driver") {
+      if (norm.driver && norm.driver.current) orders.push(norm.driver.current);
+    } else if (norm.passenger) {
+      orders = (norm.passenger.orders || []).slice();
+      if (norm.passenger.active) orders.push(norm.passenger.active);
+    }
+    var seenIds = {};
+    for (var i = 0; i < orders.length; i++) {
+      var o = orders[i];
+      if (!o || !o.id || seenIds[o.id]) continue;
+      seenIds[o.id] = true;
+      var chat = o.chat || [];
+      var last = chat.length ? chat[chat.length - 1] : null;
+      var sig = last ? String(last.at || "") + "|" + String(last.from || "") + "|" + String(last.text || "") : "";
+      var prev = _chatSeen[o.id];
+      _chatSeen[o.id] = { n: chat.length, sig: sig };
+      if (!prev || prev.sig === sig) continue;
+      var start = chat.length > prev.n ? prev.n : Math.max(0, chat.length - 1);
+      var lines = [];
+      var fresh = chat.slice(start);
+      for (var j = 0; j < fresh.length; j++) {
+        var m = fresh[j];
+        if (!m || String(m.from) === me) continue;
+        if (m.text) lines.push(m.text);
+      }
+      if (!lines.length) continue;
+      var who = role === "driver" ? "Пассажир" : "Водитель";
+      var orderId = o.id;
+      taxiBeep();
+      showBanner(who + ": " + lines.join(" "), "", function () { openDialog(orderId); });
+    }
+  }
+
+  function showBanner(text, kind, onTap) {
     var el = document.getElementById("notify-banner");
     if (!el) return;
     el.className = "notify-banner " + (kind || "");
     el.innerHTML = '<i>🔔</i><span>' + esc(text) + '</span>' +
-      '<button type="button" onclick="this.parentNode.classList.remove(\'show\')">✕</button>';
+      '<button type="button" data-banner-close="1">✕</button>';
     el.classList.add("show");
+    el.onclick = function (e) {
+      var closer = e.target && e.target.closest && e.target.closest("[data-banner-close]");
+      el.classList.remove("show");
+      clearTimeout(showBanner._t);
+      if (closer) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (typeof onTap === "function") onTap();
+    };
     if (window.Maximus && window.Maximus.haptic) window.Maximus.haptic("ok");
     clearTimeout(showBanner._t);
     showBanner._t = setTimeout(function () {
@@ -1680,29 +2208,7 @@
     }, 6000);
   }
 
-  // Свежезавершённый заказ: если приложение открыли ПОСЛЕ завершения поездки
-  // (переход статуса уже не поймать), всё равно показываем детали + предложение
-  // сохранить маршрут в избранное — но только для недавних поездок (до 30 мин).
-  function maybeOfferFreshCompleted(norm) {
-    if (!norm || !norm.passenger || !norm.user || norm.user.role !== "passenger") return;
-    var orders = norm.passenger.orders || [];
-    for (var i = 0; i < orders.length; i++) {
-      var o = orders[i];
-      if (!o || o.status !== "completed") continue;
-      var key = "o" + o.id;
-      if (_offerShown[key]) continue;
-      var at = o.completed_at ? new Date(o.completed_at).getTime() : 0;
-      if (!at) continue;
-      if ((Date.now() - at) / 60000 > 30) continue; // старые поездки не предлагаем
-      _offerShown[key] = true;
-      picked = Number(o.id);
-      window._favOrder = Number(o.id);
-      screen = "fav-offer";
-      render();
-      showBanner("Поездка #" + o.id + " завершена", "ok");
-      return;
-    }
-  }
+  var _lastRoute = {};
 
   function checkStatusChanges(data) {
     var norm = normalizeState(data);
@@ -1724,6 +2230,14 @@
       var prev = _lastStatus[key];
       var cur = o.status;
       _lastStatus[key] = cur;
+
+      var routeSig = (o.destination || "") + "|" + ((o.waypoints || []).length) + "|" + (o.price || "");
+      var prevRoute = _lastRoute[key];
+      _lastRoute[key] = routeSig;
+      if (prevRoute && prevRoute !== routeSig && (screen === "live" || screen === "d-current")) {
+        render();
+        showBanner("Маршрут заказа #" + o.id + " изменён");
+      }
 
       if (!prev || prev === cur) continue;
 
@@ -1801,8 +2315,8 @@
       // Иначе fav-offer рендерится со старым состоянием, где завершённого
       // заказа ещё нет, и детали поездки показываются пустыми.
       S = normalizeState(data);
-      maybeOfferFreshCompleted(data);
       checkStatusChanges(data);
+      checkIncomingChat(S);
     }).catch(function () {});
   }, 5000);
 

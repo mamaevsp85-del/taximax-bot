@@ -375,7 +375,13 @@ async def run_polling() -> None:
                     body = (msg or {}).get("body") if isinstance(msg, dict) else None
                     mid = body.get("mid") if isinstance(body, dict) else (msg or {}).get("mid")
                     cb_id = (cb or {}).get("callback_id") if isinstance(cb, dict) else None
-                    key = f"{upd.update_type}:{mid or cb_id or actor}:{upd.timestamp}"
+                    # Один callback_id = одно нажатие. MAX иногда присылает
+                    # копию с другим timestamp, и без этого меню обрабатывается
+                    # несколько раз подряд.
+                    if cb_id:
+                        key = f"cb:{cb_id}"
+                    else:
+                        key = f"{upd.update_type}:{mid or actor}:{upd.timestamp}"
                     if key in seen_ids:
                         logger.debug("пропущен дубликат апдейта: %s", key)
                         continue

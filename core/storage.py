@@ -40,6 +40,15 @@ ROLE_ADMIN = "admin"
 ACTIVE_ORDER_STATUSES = ("pending", "accepted", "driver_arrived", "in_progress")
 
 
+def with_entrance(pickup: str, entrance: str) -> str:
+    """Добавляет подъезд к адресу подачи, если его ещё нет в тексте."""
+    text = (pickup or "").strip()
+    number = str(entrance or "").strip().lstrip("№#").strip()
+    if not number or "подъезд" in text.lower():
+        return text
+    return f"{text}, подъезд {number}"
+
+
 class Storage:
     def __init__(self, file_path: Optional[str] = None) -> None:
         self.file_path = file_path or settings.storage_file
@@ -511,6 +520,7 @@ class Storage:
                 "pickup_coords": data.get("pickup_coords"),
                 "destination_coords": data.get("destination_coords"),
                 "price": data.get("price", 0),
+                "base_price": data.get("base_price") or data.get("price", 0),
                 "distance": data.get("distance", 0),
                 "time_minutes": data.get("time_minutes", 0),
                 "status": data.get("status", "pending"),
@@ -714,11 +724,75 @@ class Storage:
             self._sync()
             u = self.users.setdefault(int(user_id), {"user_id": int(user_id)})
             favs = u.setdefault("favorites", [])
-            entry = {"order_id": int(order_id), "label": label or "",
-                     "added_at": datetime.now().isoformat()}
+            order = self.orders.get(int(order_id)) or {}
+            entry = {
+                "order_id": int(order_id),
+                "label": label or "",
+                "pickup": order.get("pickup") or "",
+                "destination": order.get("destination") or "",
+                "entrance": order.get("entrance") or "",
+                "added_at": datetime.now().isoformat(),
+            }
             if not any(f.get("order_id") == int(order_id) for f in favs):
                 favs.append(entry)
                 self.save()
+
+    def update_favorite(self, user_id: int, index: int, **fields) -> Dict[str, Any]:
+        """Правит сохранённый маршрут, не трогая исходную поездку."""
+        allowed = ("label", "pickup", "destination", "entrance")
+        with self._lock:
+            self._sync()
+            u = self.users.get(int(user_id))
+            if not u:
+                raise ValueError("Пользователь не найден")
+            favs = list(u.get("favorites") or [])
+            if index < 0 or index >= len(favs):
+                raise ValueError("Избранное не найдено")
+            fav = dict(favs[index])
+            for key in allowed:
+                if key not in fields or fields[key] is None:
+                    continue
+                fav[key] = str(fields[key]).strip()[:160]
+            if not fav.get("pickup") or not fav.get("destination"):
+                raise ValueError("Укажите адрес подачи и назначения")
+            if not fav.get("label"):
+                fav["label"] = f"{fav['pickup']} → {fav['destination']}"[:80]
+            favs[index] = fav
+            u["favorites"] = favs
+            self.save()
+            return fav
+
+    def favorite_route(self, user_id: int, index: int) -> Dict[str, Any]:
+        """Адреса избранного: свои правки важнее исходного заказа."""
+        favs = self.get_favorites(user_id)
+        if index < 0 or index >= len(favs):
+            raise ValueError("Избранное не найдено")
+        fav = favs[index]
+        src = self.get_order(int(fav.get("order_id") or 0)) or {}
+        pickup = (fav.get("pickup") or src.get("pickup") or "").strip()
+        destination = (fav.get("destination") or src.get("destination") or "").strip()
+        if "entrance" in fav:
+            entrance = str(fav.get("entrance") or "").strip()
+        else:
+            entrance = str(src.get("entrance") or "").strip()
+        if not pickup or not destination:
+            raise ValueError("В избранном нет адресов")
+        return {
+            "fav": fav,
+            "src": src,
+            "pickup": pickup,
+            "destination": destination,
+            "entrance": entrance,
+            "label": fav.get("label") or "",
+            "pickup_coords": None if fav.get("pickup") else src.get("pickup_coords"),
+            "destination_coords": None if fav.get("destination") else src.get("destination_coords"),
+            "pickup_city": src.get("pickup_city"),
+            "destination_city": src.get("destination_city"),
+            "waypoints": [] if (fav.get("pickup") or fav.get("destination")) else (src.get("waypoints") or []),
+            "km": src.get("distance") or 0,
+            "minutes": src.get("time_minutes") or 0,
+            "price": src.get("base_price") or src.get("price") or 0,
+        }
 
     def remove_favorite(self, user_id: int, order_id: int) -> bool:
         with self._lock:
@@ -1589,6 +1663,41 @@ class Storage:
 
     def reset_access(self, driver_id: int) -> None:
         self.update_user(int(driver_id), access_expires=None)
+
+    def edit_user_profile(self, user_id: int, **values) -> None:
+        """Правка имени, телефона и автомобиля из админки."""
+        uid = int(user_id)
+        user = self.get_user(uid)
+        if not user:
+            raise ValueError("Пользователь не найден")
+        is_driver = bool(
+            user.get("driver_verification_status")
+            or user.get("car_model")
+            or user.get("driver_name")
+        )
+        fields: Dict[str, Any] = {}
+        if "name" in values:
+            name = str(values.get("name") or "").strip()
+            if not name:
+                raise ValueError("Имя не может быть пустым")
+            fields["name"] = name[:80]
+            if is_driver:
+                fields["driver_name"] = name[:80]
+        if "phone" in values:
+            phone = str(values.get("phone") or "").strip()
+            if phone:
+                fields["phone"] = phone[:32]
+                if is_driver:
+                    fields["driver_phone"] = phone[:32]
+        for key, limit in (("car_model", 60), ("car_number", 20), ("car_color", 40)):
+            if key not in values:
+                continue
+            text = str(values.get(key) or "").strip()
+            if text:
+                fields[key] = text[:limit]
+        if not fields:
+            raise ValueError("Нечего сохранять")
+        self.update_user(uid, **fields)
 
     def delete_user(self, user_id: int) -> bool:
         uid = int(user_id)

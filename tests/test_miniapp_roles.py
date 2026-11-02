@@ -67,6 +67,26 @@ class MiniAppRolesTests(unittest.TestCase):
         self.assertFalse(any(int(d["user_id"]) <= 0 for d in drivers))
         self.assertFalse(any(int(p["user_id"]) <= 0 for p in passengers))
 
+    def test_admin_can_edit_and_delete_people(self):
+        self.s.ensure_user(10, name="Анна")
+        self.s.update_user(10, phone="79990000001")
+        self.s.ensure_user(11, name="Иван")
+        self.s.update_user(11, phone="79990000002", driver_name="Иван",
+                           driver_verification_status="approved",
+                           car_model="Logan", car_number="А111АА", car_color="белый")
+        self.s.edit_user_profile(10, name="Анна Петрова", phone="79991111111")
+        self.s.edit_user_profile(11, name="Иван Сергеев", car_number="В222ВВ", car_color="серый")
+        passenger = self.s.get_user(10)
+        driver = self.s.get_user(11)
+        self.assertEqual(passenger["name"], "Анна Петрова")
+        self.assertEqual(passenger["phone"], "79991111111")
+        self.assertEqual(driver["driver_name"], "Иван Сергеев")
+        self.assertEqual(driver["car_number"], "В222ВВ")
+        self.assertEqual(driver["car_color"], "серый")
+        self.assertTrue(self.s.delete_user(10))
+        self.assertFalse(self.s.get_user(10))
+        self.assertTrue(self.s.get_user(11))
+
     def test_set_active_role_rejects_unknown(self):
         self.s.ensure_user(10)
         self.assertFalse(self.s.set_active_role(10, "driver"))

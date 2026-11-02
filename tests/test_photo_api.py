@@ -49,6 +49,7 @@ class PhotoApiTests(unittest.TestCase):
         self.s = self.storage_module.Storage(path)
         self.s.ensure_user(30, name="Водитель")
         self._orig_storage = self.api.storage.storage
+        self._orig_maximus_S = self.api.maximus_server.S
         self.api.storage.storage = self.s
         self.api.maximus_server.S = self.s
 
@@ -68,6 +69,9 @@ class PhotoApiTests(unittest.TestCase):
         self.loop.close()
         self.api.PHOTOS_DIR = self._orig_dir
         self.api.storage.storage = self._orig_storage
+        # ВАЖНО: вернуть и maximus_server.S, иначе следующие тесты пишут
+        # в удалённую временную базу (падает test_intercity и др.).
+        self.api.maximus_server.S = self._orig_maximus_S
         shutil.rmtree(self.photos, ignore_errors=True)
 
     def _post(self, payload):

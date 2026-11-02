@@ -49,10 +49,14 @@ class ResolveUidTests(unittest.TestCase):
         self.s.ensure_user(11)
         self._orig = self.api.storage.storage
         self.api.storage.storage = self.s
-        self.api.maximus_server.S = self.s if hasattr(self.api, "maximus_server") else None
+        # Запоминаем прежний maximus_server.S — иначе он «утечёт» в другие
+        # тесты и они будут писать в удалённую временную базу.
+        self._orig_maximus = self.api.maximus_server.S
+        self.api.maximus_server.S = self.s
 
     def tearDown(self):
         self.api.storage.storage = self._orig
+        self.api.maximus_server.S = self._orig_maximus
 
     def test_cookie_uid(self):
         self.assertEqual(self.api._resolve_uid(_request(cookies={"mx": "10"})), 10)

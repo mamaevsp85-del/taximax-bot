@@ -184,6 +184,13 @@ class Router:
             await Reply(self.client, user_id).send("Неизвестная команда. /start")
             return
         remember_from_update(user_id, update)  # инлайн-меню: mid сообщения с кнопкой
+        # Снимаем «часики» на кнопке сразу. Иначе MAX шлёт то же нажатие снова.
+        cb_id = getattr(update.callback, "callback_id", None)
+        if cb_id:
+            try:
+                await self.client.answer_callback(cb_id)
+            except Exception:
+                logger.debug("answer_callback %s не удался", cb_id)
         mid_before = get_menu_mid(user_id)
         await fn(self.client, user_id, update, {})
         mid_after = get_menu_mid(user_id)

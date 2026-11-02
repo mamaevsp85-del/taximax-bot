@@ -60,6 +60,11 @@ def get_tariff_settings(city: Optional[str] = None, intercity: bool = False) -> 
     if city_key:
         tb = admin.get("tariffs_by_city") or {}
         city_tariff = tb.get(city_key) or {}
+        if not city_tariff:
+            for key, value in tb.items():
+                if normalize_city(key) == city_key:
+                    city_tariff = value or {}
+                    break
         base = _default_tariff()
         base.update({k: v for k, v in city_tariff.items() if v is not None})
         return base
@@ -92,34 +97,26 @@ def _is_intercity(pickup_city: Optional[str], destination_city: Optional[str]) -
 
 def resolve_destination_city(pickup_city: Optional[str],
                              destination_city: Optional[str],
-                             destination_text: Optional[str] = "") -> str:
-    """Определяет город назначения без ложного межгорода.
+                             destination_text: Optional[str] = "",
+                             distance_km: Optional[float] = None) -> str:
+    """Город назначения для выбора тарифа.
 
-    Проблема: пассажир пишет «Юбилейная 29» без города, а геокодер может
-    найти такую улицу в другом городе — и поездка ошибочно становится
-    межгородней с междугородним тарифом.
-
-    Правило:
-      • пассажир явно указал другой город в тексте адреса — межгород;
-      • город не указан или совпадает с городом подачи — внутригородская.
+    Межгород — когда оба города известны и они разные.
+    Исключение: геокодер нашёл одноимённую улицу в другом регионе
+    (сотни километров) и пассажир этот город в адресе не писал —
+    тогда оставляем город подачи.
     """
     if not pickup_city:
         return destination_city or ""
     if not destination_city:
-        # Город не определён — считаем, что это город подачи.
         return pickup_city
-
-    same = normalize_city(pickup_city) == normalize_city(destination_city)
-    if same:
+    if normalize_city(pickup_city) == normalize_city(destination_city):
         return destination_city
 
-    # Геокодер вернул другой город. Принимаем его, только если пассажир
-    # действительно написал этот город в адресе.
-    text = (destination_text or "").lower()
-    if text and normalize_city(destination_city).lower() in text:
-        return destination_city
-
-    return pickup_city
+    named = normalize_city(destination_city) in (destination_text or "").lower()
+    if distance_km is not None and float(distance_km) > 300 and not named:
+        return pickup_city
+    return destination_city
 
 
 

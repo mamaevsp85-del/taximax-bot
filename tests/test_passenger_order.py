@@ -142,6 +142,24 @@ class PassengerOrderTests(unittest.IsolatedAsyncioTestCase):
         texts = [c.kwargs.get("text", "") for c in self.client.send_message.call_args_list]
         self.assertTrue(any("5/5" in t for t in texts))
 
+    def test_edit_favorite_keeps_source_order(self):
+        from core.storage import with_entrance
+        oid = self.s.create_order({
+            "passenger_id": 20, "pickup": "Абакан, Ленина 1",
+            "destination": "Абакан, Мира 5", "price": 150,
+            "status": "completed", "created_at": "2024-01-01T00:00:00",
+        })
+        self.s.add_favorite(20, oid, label="Дом → Работа")
+        self.s.update_favorite(20, 0, pickup="Абакан, Ленина 9",
+                               destination="Абакан, Кирова 20", entrance="3",
+                               label="Дом → Магазин")
+        route = self.s.favorite_route(20, 0)
+        self.assertEqual(route["pickup"], "Абакан, Ленина 9")
+        self.assertEqual(route["entrance"], "3")
+        self.assertEqual(self.s.get_order(oid)["pickup"], "Абакан, Ленина 1")
+        self.assertEqual(with_entrance("Абакан, Ленина 9", "3"), "Абакан, Ленина 9, подъезд 3")
+        self.assertEqual(with_entrance("Абакан, Ленина 9, подъезд 1", "3"), "Абакан, Ленина 9, подъезд 1")
+
     async def test_favorite_use_creates_order(self):
         oid = self.s.create_order({
             "passenger_id": 20, "pickup": "Абакан, Ленина 1",
@@ -153,6 +171,11 @@ class PassengerOrderTests(unittest.IsolatedAsyncioTestCase):
                           new=AsyncMock()):
             await self.router.callback_handlers["passenger:favorite_use:"](
                 self.client, 20, self.update("passenger:favorite_use:0", 20), {})
+            pending = [o for o in self.s.orders.values()
+                       if o.get("passenger_id") == 20 and o.get("id") != oid]
+            self.assertEqual(len(pending), 0)
+            await self.router.callback_handlers["passenger:favorite_confirm:"](
+                self.client, 20, self.update("passenger:favorite_confirm:0", 20), {})
         new_orders = [o for o in self.s.orders.values()
                       if o.get("passenger_id") == 20 and o.get("id") != oid]
         self.assertEqual(len(new_orders), 1)

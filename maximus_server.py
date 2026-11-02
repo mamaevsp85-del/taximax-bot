@@ -17,12 +17,16 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 BOT = ROOT
 FRONTEND = os.path.join(ROOT, "frontend")
 DATA = os.path.join(ROOT, "data", "taxi_data.json")
-os.environ["STORAGE_FILE"] = DATA
+# STORAGE_FILE из окружения имеет приоритет (тесты, деплой с volume).
+# Раньше здесь стояло безусловное присваивание — из-за него игнорировались
+# тестовые/деплойные пути и данные писались в боевую базу.
+os.environ.setdefault("STORAGE_FILE", DATA)
 if BOT not in sys.path:
     sys.path.insert(0, BOT)
 
-from core.storage import storage as S  # noqa: E402
+from core.storage import storage as S, with_entrance  # noqa: E402
 from core.storage import get_available_orders_for_driver  # noqa: E402
+from core.service_area import normalize_city  # noqa: E402
 from core.tariff_manager import calculate_trip_price, resolve_destination_city, _is_intercity  # noqa: E402
 from core.driver_support import (  # noqa: E402
     add_order_to_driver_queue,
@@ -137,7 +141,7 @@ def brief_order(o: dict) -> dict:
         "pickup_coords": o.get("pickup_coords"),
         "destination_coords": o.get("destination_coords"),
         "price": o.get("final_price") or o.get("price") or 0,
-        "base_price": o.get("price") or 0,
+        "base_price": o.get("base_price") or o.get("price") or 0,
         "final_price": o.get("final_price") or o.get("price") or 0,
         "distance": o.get("distance") or 0,
         "time_minutes": o.get("time_minutes") or 0,
@@ -377,33 +381,52 @@ def quote(pickup: str, dest: str, stop: str = "",
         dc = _coords_or_none(dest_coords)
         city1 = city2 = ""
 
-        # Сначала определяем город подачи — от него зависит поиск назначения
-        if pc is None:
+        # Подача и назначение ищутся одновременно: так расчёт не ждёт
+        # два запроса к геокодеру друг за другом.
+        if pc is None and dc is None:
+            (pc, city1), (dc, city2) = await asyncio.gather(
+                geo_cached(pickup), geo_cached(dest))
+        elif pc is None:
             pc, city1 = await geo_cached(pickup)
+        elif dc is None:
+            dc, city2 = await geo_cached(dest)
         if not pc:
             raise ValueError("Не удалось найти адрес подачи")
-        if not city1:
-            city1 = await _city_by_coords(pc["lat"], pc["lon"])
-
-        # Адрес назначения: если пассажир написал город в адресе — ищем как есть.
-        # Если город не написан — ищем в городе подачи, чтобы «Юбилейная 29»
-        # не нашлась в другом регионе за тысячи километров.
         if not dc:
-            if city1 and not _city_mentioned(dest, city1) and not _has_explicit_other_city(dest, city1):
-                dc, city2 = await geo_cached(f"{dest}, {city1}")
-            if not dc:
-                dc, city2 = await geo_cached(dest)
+            dc, city2 = await geo_cached(dest)
+        if pc and not city1 and dc and not city2:
+            city1, city2 = await asyncio.gather(
+                _city_by_coords(pc["lat"], pc["lon"]),
+                _city_by_coords(dc["lat"], dc["lon"]),
+            )
+        elif pc and not city1:
+            city1 = await _city_by_coords(pc["lat"], pc["lon"])
+        elif dc and not city2:
+            city2 = await _city_by_coords(dc["lat"], dc["lon"])
+
+        # Адрес назначения ищем как написал пассажир. Если нашлась улица
+        # в другом регионе и город в тексте не назван — повторяем поиск
+        # в городе подачи. Соседние города (Абакан и Черногорск) остаются
+        # разными: для них действует межгород.
+        if dc and city1:
+            far = _haversine(pc["lat"], pc["lon"], dc["lat"], dc["lon"])
+            named = _has_explicit_other_city(dest, city1) or _city_mentioned(dest, city2)
+            other = bool(city2) and normalize_city(city2) != normalize_city(city1)
+            if other and far > 300 and not named:
+                alt, alt_city = await geo_cached(f"{dest}, {city1}")
+                if alt:
+                    dc, city2 = alt, (alt_city or city1)
         if not dc:
             raise ValueError("Не удалось найти адрес назначения")
         if not city2:
             city2 = await _city_by_coords(dc["lat"], dc["lon"])
 
-        # Не превращаем поездку в межгород, если пассажир не указал другой город
-        dest_city = resolve_destination_city(city1, city2, dest)
+        far = _haversine(pc["lat"], pc["lon"], dc["lat"], dc["lon"])
+        dest_city = resolve_destination_city(city1, city2, dest, distance_km=far)
 
         # Защита: если город совпадает с подачей, но точка уехала далеко —
         # значит геокодер нашёл одноимённую улицу в другом регионе.
-        if dest_city == city1 and city1:
+        if city1 and normalize_city(dest_city or "") == normalize_city(city1):
             far = _haversine(pc["lat"], pc["lon"], dc["lat"], dc["lon"])
             if far > 300:
                 raise ValueError(
@@ -444,6 +467,56 @@ def _bot_link() -> str:
     if username:
         return f"https://max.ru/{username}"
     return ""
+
+
+def _send_call_card(to_uid: int, peer_uid: int, name: str, phone: str, who: str) -> None:
+    """Кладёт в чат с ботом карточку собеседника: звонок идёт из MAX, без max.ru/id."""
+    import threading
+
+    def worker():
+        try:
+            asyncio.run(_contact_async(to_uid, peer_uid, name, phone, who))
+        except Exception as exc:
+            logger.warning("Не удалось отправить карточку звонка %s: %s", to_uid, exc)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+async def _contact_async(to_uid: int, peer_uid: int, name: str, phone: str, who: str) -> None:
+    from max_api.client import MaxClient, MaxApiError
+    from max_api.keyboards import contact_attachment
+
+    card = contact_attachment(name, peer_uid, phone)
+    vcf_only = {
+        "type": "contact",
+        "payload": {"name": card["payload"]["name"], "vcf_info": card["payload"].get("vcf_info") or ""},
+    }
+    id_only = {
+        "type": "contact",
+        "payload": {"name": card["payload"]["name"], "contact_id": int(peer_uid)},
+    }
+    variants = [card, id_only]
+    if vcf_only["payload"].get("vcf_info"):
+        variants.append(vcf_only)
+    client = MaxClient()
+    try:
+        last = None
+        for attachment in variants:
+            try:
+                await client.send_message(
+                    user_id=to_uid,
+                    text=f"📞 Контакт {who}. Нажмите на карточку и позвоните в MAX.",
+                    text_format="html",
+                    attachments=[attachment],
+                )
+                return
+            except MaxApiError as exc:
+                last = exc
+                logger.warning("Карточка звонка не принята (%s), пробую другой формат", exc)
+        if last:
+            raise last
+    finally:
+        await client.close()
 
 
 def _notify_passenger(order: dict, text: str, keyboard: list | None = None) -> None:
@@ -503,11 +576,11 @@ async def _geo_prompt_async(user_id: int, kind: str) -> None:
     try:
         await client.send_message(
             user_id=user_id,
-            text=(f"📍 <b>Отправьте {label}</b>\n\n"
-                  "Нажмите кнопку ниже — приложение сразу подставит адрес.\n"
-                  "После отправки вернитесь в мини-приложение."),
+            text=(f"📍 <b>Подтвердите {label}</b>\n\n"
+                  "Нажмите кнопку ниже. MAX откроет окно подтверждения геолокации.\n"
+                  "После подтверждения вернитесь в приложение — адрес уже будет в строке."),
             attachments=keyboard_attachment(
-                [[request_geo_location_button("📍 Отправить геолокацию", quick=True)]]),
+                [[request_geo_location_button("Подтвердить геолокацию", quick=False)]]),
         )
     finally:
         await client.close()
@@ -580,6 +653,48 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return r * 2 * math.asin(math.sqrt(a))
 
 
+def _favorite_draft(uid: int, index: int) -> dict:
+    """Маршрут из избранного для экрана подтверждения, без создания заказа."""
+    route = S.favorite_route(uid, index)
+    draft = {
+        "pickup": route["pickup"],
+        "destination": route["destination"],
+        "entrance": route["entrance"],
+        "label": route["label"],
+        "pickup_coords": route["pickup_coords"],
+        "destination_coords": route["destination_coords"],
+        "pickup_city": route["pickup_city"],
+        "destination_city": route["destination_city"],
+        "waypoints": route["waypoints"],
+        "km": route["km"],
+        "minutes": route["minutes"],
+        "price": route["price"],
+        "step": 3,
+    }
+    # Цена пересчитывается по уже известному километражу, без повторного
+    # поиска адресов. Геокодер нужен только если координат ещё нет.
+    if route.get("pickup_coords") and route.get("destination_coords") and route.get("km"):
+        draft["price"] = calculate_trip_price(
+            float(route["km"]), int(route.get("minutes") or 0),
+            pickup_city=route.get("pickup_city") or "",
+            destination_city=route.get("destination_city") or "",
+        )
+        draft["is_intercity"] = _is_intercity(route.get("pickup_city"), route.get("destination_city"))
+        return draft
+    try:
+        fresh = quote(
+            route["pickup"], route["destination"],
+            pickup_coords=route.get("pickup_coords"),
+            dest_coords=route.get("destination_coords"),
+        )
+        fresh["entrance"] = route["entrance"]
+        fresh["label"] = route["label"]
+        fresh["step"] = 3
+        return fresh
+    except Exception:
+        return draft
+
+
 def create_order(uid: int, draft: dict, price=None) -> dict:
     active = S.get_passenger_active_order(uid)
     if active:
@@ -602,12 +717,14 @@ def create_order(uid: int, draft: dict, price=None) -> dict:
     user = S.get_user(uid) or {}
     oid = S.create_order({
         "passenger_id": uid,
-        "pickup": draft["pickup"],
+        "pickup": with_entrance(draft["pickup"], draft.get("entrance")),
+        "entrance": str(draft.get("entrance") or "").strip(),
         "destination": draft["destination"],
         "pickup_coords": draft.get("pickup_coords"),
         "destination_coords": draft.get("destination_coords"),
         "distance": draft.get("km") or 0,
         "time_minutes": draft.get("minutes") or 0,
+        "base_price": draft.get("price") or 0,
         "price": price if price is not None else draft.get("price") or 0,
         "pickup_city": draft.get("pickup_city"),
         "destination_city": draft.get("destination_city"),
@@ -773,8 +890,8 @@ def act(uid: int, body: dict) -> dict:
             raise PermissionError("Сначала выберите профиль")
         kind = body.get("kind") or "pickup"
         req = S.set_geo_request(uid, kind=kind, ttl_minutes=10)
-        _send_geo_prompt(uid, kind)
-        return {"ok": True, "geo": req}
+        run(_geo_prompt_async(uid, kind))
+        return {"ok": True, "geo": req, "bot_link": _bot_link()}
 
     if op == "geo.poll":
         # Мини-апп проверяет, прислал ли пользователь точку в чат
@@ -903,7 +1020,49 @@ def act(uid: int, body: dict) -> dict:
         if not draft.get("pickup_coords"):
             draft = quote(draft.get("pickup", ""), draft.get("destination", ""), draft.get("stop", ""))
         price = body.get("price")
+        if price is not None:
+            try:
+                price = int(price)
+            except (TypeError, ValueError):
+                raise ValueError("Некорректная сумма")
+            calc = int(draft.get("price") or 0)
+            if price < calc:
+                raise ValueError(f"Своя цена не может быть ниже рассчитанной ({calc} ₽)")
+            if price < 50:
+                raise ValueError("Сумма слишком маленькая")
         return {"ok": True, "order": create_order(uid, draft, price)}
+    if op == "order.route":
+        order = S.get_order(int(body.get("id") or 0))
+        if not order or uid not in (order.get("passenger_id"), order.get("driver_id")):
+            raise ValueError("Нет доступа к заказу")
+        if order.get("status") not in ("pending", "accepted", "driver_arrived", "in_progress"):
+            raise ValueError("Маршрут этого заказа уже нельзя менять")
+        dest = (body.get("destination") or order.get("destination") or "").strip()
+        stop = (body.get("stop") or "").strip()
+        if len(dest) < 3:
+            raise ValueError("Укажите адрес назначения")
+        fresh = quote(
+            order.get("pickup") or "", dest, stop,
+            pickup_coords=order.get("pickup_coords"),
+            dest_coords=body.get("destination_coords") or body.get("dest_coords"),
+        )
+        S.update_order(
+            order["id"],
+            destination=fresh["destination"],
+            destination_coords=fresh.get("destination_coords"),
+            destination_city=fresh.get("destination_city"),
+            waypoints=fresh.get("waypoints") or [],
+            distance=fresh.get("km") or 0,
+            time_minutes=fresh.get("minutes") or 0,
+            base_price=fresh["price"],
+            price=fresh["price"],
+        )
+        text = f"Маршрут заказа #{order['id']} изменён: {fresh['destination']}"
+        if uid == order.get("passenger_id") and order.get("driver_id"):
+            _notify_passenger({"passenger_id": order.get("driver_id")}, text)
+        elif uid == order.get("driver_id"):
+            _notify_passenger(order, text)
+        return {"ok": True}
     if op == "order.price":
         order = own_order(uid, int(body["id"]))
         if order.get("status") not in ("pending", "accepted", "driver_arrived"):
@@ -911,6 +1070,9 @@ def act(uid: int, body: dict) -> dict:
         price = int(body.get("price") or 0)
         if price < 50:
             raise ValueError("Сумма слишком маленькая")
+        base = int(order.get("base_price") or order.get("price") or 0)
+        if price <= base:
+            raise ValueError(f"Своя цена должна быть больше рассчитанной ({base} ₽)")
         S.update_order(order["id"], price=price)
         return {"ok": True}
     if op == "order.cancel":
@@ -950,6 +1112,26 @@ def act(uid: int, body: dict) -> dict:
             raise ValueError("Опишите, что не так")
         S.update_order(order["id"], complaint=text, complaint_at=datetime.now().isoformat())
         return {"ok": True}
+    if op == "order.call":
+        order = S.get_order(int(body.get("id") or 0))
+        if not order or uid not in (order.get("passenger_id"), order.get("driver_id")):
+            raise ValueError("Нет доступа к заказу")
+        if uid == order.get("passenger_id"):
+            peer = order.get("driver_id")
+            peer_u = S.get_user(peer) or {}
+            name = peer_u.get("driver_name") or peer_u.get("name") or "Водитель"
+            phone = peer_u.get("phone") or ""
+            who = "водителя"
+        else:
+            peer = order.get("passenger_id")
+            peer_u = S.get_user(peer) or {}
+            name = peer_u.get("name") or "Пассажир"
+            phone = peer_u.get("phone") or ""
+            who = "пассажира"
+        if not peer:
+            raise ValueError("Собеседник ещё не назначен")
+        _send_call_card(uid, int(peer), name, phone, who)
+        return {"ok": True, "bot_link": _bot_link()}
     if op == "order.chat":
         order = S.get_order(int(body["id"]))
         if not order or uid not in (order.get("passenger_id"), order.get("driver_id")):
@@ -967,6 +1149,10 @@ def act(uid: int, body: dict) -> dict:
         peer = did if uid == pid else pid
         if peer:
             sender_role = "Водитель" if uid == did else "Пассажир"
+            open_payload = (
+                f"passenger:order:{order['id']}" if uid == did
+                else "driver:current_order"
+            )
             try:
                 peer_int = int(peer)
                 import threading
@@ -980,7 +1166,7 @@ def act(uid: int, body: dict) -> dict:
                             keyboard=[[{
                                 "type": "callback",
                                 "text": "Открыть заказ",
-                                "payload": f"passenger:order:{order['id']}",
+                                "payload": open_payload,
                             }]],
                         ))
                     except Exception as exc:
@@ -990,28 +1176,29 @@ def act(uid: int, body: dict) -> dict:
             except (TypeError, ValueError):
                 pass
 
-        return {"ok": True}
+        return {"ok": True, "chat": chat[-40:]}
     if op == "favorite.add":
         order = own_order(uid, int(body["id"]))
         label = f"{order.get('pickup', '')} → {order.get('destination', '')}"
         S.add_favorite(uid, order["id"], label=label[:80])
         return {"ok": True}
+    if op == "favorite.edit":
+        pickup = (body.get("pickup") or "").strip()
+        destination = (body.get("destination") or "").strip()
+        if len(pickup) < 3 or len(destination) < 3:
+            raise ValueError("Укажите адрес подачи и назначения")
+        label = (body.get("label") or "").strip() or f"{pickup} → {destination}"
+        S.update_favorite(
+            uid, int(body.get("index") or 0),
+            pickup=pickup, destination=destination,
+            entrance=(body.get("entrance") or "").strip(),
+            label=label[:80],
+        )
+        return {"ok": True}
+    if op == "favorite.preview":
+        return {"ok": True, "draft": _favorite_draft(uid, int(body.get("index") or 0))}
     if op == "favorite.use":
-        favs = S.get_favorites(uid)
-        idx = int(body.get("index") or 0)
-        if idx < 0 or idx >= len(favs):
-            raise ValueError("Избранное не найдено")
-        src = S.get_order(int(favs[idx].get("order_id") or 0))
-        if not src:
-            raise ValueError("Исходный заказ не найден")
-        draft = {
-            "pickup": src.get("pickup"), "destination": src.get("destination"),
-            "pickup_coords": src.get("pickup_coords"), "destination_coords": src.get("destination_coords"),
-            "pickup_city": src.get("pickup_city"), "destination_city": src.get("destination_city"),
-            "waypoints": src.get("waypoints") or [],
-            "km": src.get("distance") or 0, "minutes": src.get("time_minutes") or 0,
-            "price": src.get("price") or 0,
-        }
+        draft = _favorite_draft(uid, int(body.get("index") or 0))
         return {"ok": True, "order": create_order(uid, draft)}
     if op == "driver.apply":
         number = (body.get("plate") or "").strip()
@@ -1172,11 +1359,34 @@ def act(uid: int, body: dict) -> dict:
         return {"ok": True}
     if op.startswith("admin."):
         must_role(uid, "admin")
-        return admin_act(body)
+        return admin_act(body, actor=uid)
     raise ValueError("Неизвестное действие")
 
 
-def admin_act(body: dict) -> dict:
+_TARIFF_FIELDS = (
+    "base_price", "included_km", "price_per_km", "price_per_minute",
+    "min_price", "rounding_step", "free_waiting_minutes", "waiting_price_per_minute",
+)
+
+
+def _tariff_key(tariffs: dict, city: str) -> str:
+    if city in tariffs:
+        return city
+    for key in tariffs:
+        if normalize_city(str(key)) == city:
+            return key
+    return city
+
+
+def _apply_tariff_fields(current: dict, body: dict) -> None:
+    for field in _TARIFF_FIELDS:
+        raw = body.get(field)
+        if raw is None or raw == "":
+            continue
+        current[field] = float(raw)
+
+
+def admin_act(body: dict, actor: int | None = None) -> dict:
     op = body["op"]
     if op == "admin.approve":
         S.approve_driver(int(body["id"]))
@@ -1198,7 +1408,18 @@ def admin_act(body: dict) -> dict:
     elif op == "admin.resetacc":
         S.reset_access(int(body["id"]))
     elif op == "admin.delete":
-        S.delete_user(int(body["id"]))
+        target = int(body["id"])
+        if actor and target == int(actor):
+            raise ValueError("Нельзя удалить свою учётную запись")
+        if not S.delete_user(target):
+            raise ValueError("Пользователь не найден")
+    elif op == "admin.user.edit":
+        target = int(body["id"])
+        payload = {}
+        for key in ("name", "phone", "car_model", "car_number", "car_color"):
+            if key in body and body.get(key) is not None:
+                payload[key] = body.get(key)
+        S.edit_user_profile(target, **payload)
     elif op == "admin.order.cancel":
         S.cancel_order(int(body["id"]))
     elif op == "admin.order.price":
@@ -1216,12 +1437,34 @@ def admin_act(body: dict) -> dict:
     elif op == "admin.balances":
         S.set_balances_disabled(flag(body.get("hidden")))
     elif op == "admin.tariff":
-        city = (body.get("city") or "").strip()
+        city = normalize_city(body.get("city") or "")
         if not city:
             raise ValueError("Укажите город")
         tariffs = dict(S.admin_data.get("tariffs_by_city") or {})
-        tariffs[city] = {"price_per_km": float(body.get("price_per_km") or 0)}
+        current = dict(tariffs.pop(_tariff_key(tariffs, city), {}) or {})
+        _apply_tariff_fields(current, body)
+        if not any(field in current for field in _TARIFF_FIELDS):
+            raise ValueError("Укажите хотя бы одно значение тарифа")
+        tariffs[city] = current
         S.admin_data["tariffs_by_city"] = tariffs
+        S.save()
+    elif op == "admin.tariff.delete":
+        city = normalize_city(body.get("city") or "")
+        if not city:
+            raise ValueError("Укажите город")
+        tariffs = dict(S.admin_data.get("tariffs_by_city") or {})
+        key = _tariff_key(tariffs, city)
+        if key not in tariffs:
+            raise ValueError("Тариф этого города не найден")
+        tariffs.pop(key, None)
+        S.admin_data["tariffs_by_city"] = tariffs
+        S.save()
+    elif op == "admin.tariff.intercity":
+        current = dict(S.admin_data.get("tariff_intercity") or {})
+        _apply_tariff_fields(current, body)
+        if not current:
+            raise ValueError("Укажите хотя бы одно значение тарифа")
+        S.admin_data["tariff_intercity"] = current
         S.save()
     elif op == "admin.content":
         for key, field in (("passenger_welcome", "passenger"), ("driver_welcome", "driver"), ("support_contact", "support")):

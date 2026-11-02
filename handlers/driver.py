@@ -1772,7 +1772,24 @@ async def driver_relay_message(client, user_id, update, ctx):
         partner_id = int(sess.get("partner_id"))
     except (TypeError, ValueError):
         return
-    await client.send_message(user_id=partner_id, text=text)
+    order = None
+    try:
+        order = S.get_order(int(sess.get("order_id") or 0))
+    except (TypeError, ValueError):
+        order = None
+    if order:
+        chat = list(order.get("chat") or [])
+        chat.append({"from": user_id, "text": text, "at": datetime.now().isoformat()})
+        S.update_order(order["id"], chat=chat[-40:])
+        who = "Водитель" if user_id == order.get("driver_id") else "Пассажир"
+    else:
+        who = "Сообщение"
+    await client.send_message(
+        user_id=partner_id,
+        text=f"💬 <b>{who}</b>\n\n{text}",
+        text_format="html",
+        notify=True,
+    )
 
 
 # ==================== РЕГИСТРАЦИЯ РОУТЕРА ====================

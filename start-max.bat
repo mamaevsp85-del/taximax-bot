@@ -5,8 +5,8 @@ set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"
 
 echo ============================================================
-echo  ТаксиМакс - единый запуск: бот + Mini-App + туннель
-echo  БД одна для всех: data\taxi_data.json
+echo  ТаксиМакс — бот + Mini-App + туннель
+echo  База одна: data\taxi_data.json
 echo ============================================================
 echo.
 
@@ -23,38 +23,90 @@ if not exist ".venv\Scripts\python.exe" (
   .venv\Scripts\pip.exe install -r requirements.txt || goto :err
 )
 
-echo [*] Отключаю переход ПК в сон/гибернацию (чтобы приложение не "засыпало")...
-powercfg /change standby-timeout-ac 0
-powercfg /change hibernate-timeout-ac 0
-powercfg /change standby-timeout-dc 0
-powercfg /change hibernate-timeout-dc 0
+if not exist "%~dp0logs" mkdir "%~dp0logs"
 
-echo [*] Запускаю бота (long polling)...
-start "TaxiMax Bot" /min cmd /c ""%~dp0.venv\Scripts\python.exe" -u "%~dp0main.py""
+echo [*] Отключаю переход ПК в сон/гибернацию...
+powercfg /change standby-timeout-ac 0 >nul 2>&1
+powercfg /change hibernate-timeout-ac 0 >nul 2>&1
+powercfg /change standby-timeout-dc 0 >nul 2>&1
+powercfg /change hibernate-timeout-dc 0 >nul 2>&1
 
-echo [*] Запускаю API/Mini-App сервер (порт 8080)...
-start "TaxiMax API" /min cmd /c ""%~dp0.venv\Scripts\python.exe" -u "%~dp0api_server.py""
+set "PY=%~dp0.venv\Scripts\python.exe"
 
-timeout /t 3 >nul
+call :running python.exe main.py
+if errorlevel 1 (
+  echo [*] Запускаю бота ^(long polling, автоперезапуск^)...
+  start "TaxiMax Bot" /min "%~dp0run-bot.bat"
+) else (
+  echo [*] Бот уже запущен.
+)
+
+call :running python.exe api_server.py
+if errorlevel 1 (
+  echo [*] Запускаю API/Mini-App ^(порт 8080, автоперезапуск^)...
+  start "TaxiMax API" /min "%~dp0run-api.bat"
+) else (
+  echo [*] API уже запущен.
+)
+
+echo [*] Жду, пока поднимется http://127.0.0.1:8080/ ...
+set /a WAIT=0
+:waitapi
+netstat -ano | find ":8080" | find "LISTENING" >nul
+if not errorlevel 1 goto :apiup
+set /a WAIT+=1
+if %WAIT% GEQ 20 (
+  echo [!] API не открыл порт 8080. Смотрите logs\api.log
+  goto :apiup
+)
+ping -n 2 127.0.0.1 >nul
+goto :waitapi
+
+:apiup
 echo.
-echo Локально:   http://127.0.0.1:8080/
-echo Постоянный адрес Mini-App: https://pearl-aspen-b471789c.tunnl.gg
+echo Локально:  http://127.0.0.1:8080/
+echo Mini-App:  https://pearl-aspen-b471789c.tunnl.gg
 echo В MAX: Чат-боты -^> бот -^> Настройки -^> ссылка Mini-App = адрес выше.
-echo Выйти из туннеля = Ctrl+C (бот и API продолжат работать).
+echo Закрыть это окно или Ctrl+C — остановить только туннель.
+echo Бот и API продолжат работать.
 echo ============================================================
 
 set "SSH=%~dp0MaximusTax\tools\OpenSSH-Win64\ssh.exe"
+set "KEY=%~dp0MaximusTax\tools\tunnel_key"
 if not exist "%SSH%" (
-  echo [!] Не найден %SSH% - туннель не запущен. Бот и API работают локально.
+  echo [!] Не найден %SSH%
+  echo     Бот и API работают локально, туннель не запущен.
+  pause
+  exit /b 0
+)
+if not exist "%KEY%" (
+  echo [!] Не найден ключ туннеля: %KEY%
+  echo     Бот и API работают локально.
   pause
   exit /b 0
 )
 
+call :running ssh.exe proxy.tunnl.gg
+if not errorlevel 1 (
+  echo [*] Туннель уже запущен.
+  pause
+  exit /b 0
+)
+
+echo [%date% %time%] tunnel start >> "%~dp0logs\tunnel.log"
 :again
-"%SSH%" -i "%~dp0MaximusTax\tools\tunnel_key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -tt -R 80:127.0.0.1:8080 stable@proxy.tunnl.gg
+echo [*] Туннель: https://pearl-aspen-b471789c.tunnl.gg  -^>  127.0.0.1:8080
+"%SSH%" -i "%KEY%" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=15 -tt -R 80:127.0.0.1:8080 stable@proxy.tunnl.gg
+echo [%date% %time%] tunnel exited code=%ERRORLEVEL% >> "%~dp0logs\tunnel.log"
 echo [!] Туннель оборвался, переподключаюсь через 5 сек...
-timeout /t 5
+ping -n 6 127.0.0.1 >nul
 goto again
+
+:running
+set "PROC=%~1"
+set "PART=%~2"
+powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -eq $env:PROC -and $_.CommandLine -like ('*' + $env:PART + '*') }) { exit 0 } else { exit 1 }"
+exit /b %ERRORLEVEL%
 
 :err
 echo [!] Ошибка установки/запуска. Проверьте интернет и Python.

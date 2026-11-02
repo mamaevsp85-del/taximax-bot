@@ -169,6 +169,11 @@ class FullCycleTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.passenger_mod, "notify_drivers_about_order", new=AsyncMock()):
             await self.router.callback_handlers["passenger:favorite_use:"](
                 self.client, 20, _make_update("passenger:favorite_use:0", 20), {})
+            pending = [o for o in self.s.orders.values()
+                       if o.get("passenger_id") == 20 and o.get("id") != oid]
+            self.assertEqual(len(pending), 0)
+            await self.router.callback_handlers["passenger:favorite_confirm:"](
+                self.client, 20, _make_update("passenger:favorite_confirm:0", 20), {})
         new_orders = [o for o in self.s.orders.values()
                       if o.get("passenger_id") == 20 and o.get("id") != oid]
         self.assertEqual(len(new_orders), 1)

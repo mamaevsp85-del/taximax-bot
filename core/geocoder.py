@@ -89,7 +89,7 @@ async def geocode_address(address: str) -> Tuple[Optional[dict], str]:
                 "format": "json",
                 "results": 1,
             }
-            resp = await client.get(settings.yandex_geocoder_url, params=params, timeout=10.0)
+            resp = await client.get(settings.yandex_geocoder_url, params=params, timeout=3.5)
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
@@ -140,7 +140,7 @@ async def get_address_by_coordinates(latitude: float, longitude: float) -> Tuple
                 "results": 1,
                 "kind": "house",
             }
-            resp = await client.get(settings.yandex_geocoder_url, params=params, timeout=10.0)
+            resp = await client.get(settings.yandex_geocoder_url, params=params, timeout=2.5)
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:
@@ -290,7 +290,7 @@ async def suggest_address(query: str, city: str = "", limit: int = 8,
 
     try:
         async with httpx.AsyncClient(trust_env=False) as client:
-            resp = await client.get(SUGGEST_URL, params=params, timeout=8.0)
+            resp = await client.get(SUGGEST_URL, params=params, timeout=3.5)
             resp.raise_for_status()
             data = resp.json()
     except Exception as exc:

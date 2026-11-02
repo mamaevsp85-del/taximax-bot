@@ -315,6 +315,7 @@ def register_admin(router: Router) -> None:
             [callback_button("⭐ Убрать приоритет", f"a:drv:remprio:{did}")] if d["priority_seconds"] > 0
             else [callback_button("⭐ Установить приоритет", f"a:drv:setprio:{did}")],
             [callback_button("💳 Баланс и доступ", f"a:drv:balance:{did}")],
+            [callback_button("✏️ Изменить", f"a:drv:edit:{did}")],
             [callback_button("🗑 Удалить водителя", f"a:drv:delconf:{did}")],
             [callback_button("↪️ К списку", "a:drivers")],
         ]
@@ -469,6 +470,11 @@ def register_admin(router: Router) -> None:
         if not _is_admin(user_id):
             return
         did = _int(update.callback.payload, 3)
+        if did == user_id:
+            await _Reply(client, user_id).send(
+                "❌ Нельзя удалить свою учётную запись.",
+                keyboard=[[callback_button("↪️ К списку", "a:drivers")]])
+            return
         if S.delete_user(did):
             await _Reply(client, user_id).send("✅ Водитель удалён.",
                                               keyboard=[[callback_button("↪️ К списку", "a:drivers")]])
@@ -841,6 +847,7 @@ def register_admin(router: Router) -> None:
         rows = [
             [callback_button("🔓 Разблокировать", f"a:pass:unblock:{pid}")] if p["is_blocked"]
             else [callback_button("🚫 Заблокировать", f"a:pass:block:{pid}")],
+            [callback_button("✏️ Изменить", f"a:pass:edit:{pid}")],
             [callback_button("🗑 Удалить", f"a:pass:delconf:{pid}")],
             [callback_button("↪️ К списку", "a:passengers")],
         ]
@@ -909,12 +916,91 @@ def register_admin(router: Router) -> None:
         if not _is_admin(user_id):
             return
         pid = _int(update.callback.payload, 3)
+        if pid == user_id:
+            await _Reply(client, user_id).send(
+                "❌ Нельзя удалить свою учётную запись.",
+                keyboard=[[callback_button("↪️ К списку", "a:passengers")]])
+            return
         if S.delete_user(pid):
             await _Reply(client, user_id).send("✅ Пассажир удалён.",
                                               keyboard=[[callback_button("↪️ К списку", "a:passengers")]])
         else:
             await _Reply(client, user_id).send("❌ Не удалось удалить пассажира.",
                                               keyboard=[[callback_button(BACK, "a:menu")]])
+
+    _PROFILE_FIELDS = {
+        "name": "имя",
+        "phone": "телефон",
+        "car_model": "модель автомобиля",
+        "car_number": "номер автомобиля",
+        "car_color": "цвет автомобиля",
+    }
+
+    async def profile_edit_menu(client, user_id, update, ctx):
+        if not _is_admin(user_id):
+            return
+        parts = update.callback.payload.split(":")
+        kind = parts[1]
+        target = int(parts[3])
+        back = f"a:pass:manage:{target}" if kind == "pass" else f"a:drv:manage:{target}"
+        rows = [
+            [callback_button("📝 Имя", f"a:{kind}:field:{target}:name")],
+            [callback_button("📱 Телефон", f"a:{kind}:field:{target}:phone")],
+        ]
+        if kind == "drv":
+            rows.extend([
+                [callback_button("🚗 Модель", f"a:drv:field:{target}:car_model")],
+                [callback_button("🔢 Номер", f"a:drv:field:{target}:car_number")],
+                [callback_button("🎨 Цвет", f"a:drv:field:{target}:car_color")],
+            ])
+        rows.append([callback_button("↪️ Назад", back)])
+        await _Reply(client, user_id).send("✏️ <b>Что изменить?</b>", keyboard=rows)
+
+    async def profile_edit_ask(client, user_id, update, ctx):
+        if not _is_admin(user_id):
+            return
+        parts = update.callback.payload.split(":")
+        kind, target, field = parts[1], int(parts[3]), parts[4]
+        if field not in _PROFILE_FIELDS or (kind == "pass" and field.startswith("car_")):
+            await _Reply(client, user_id).send("❌ Неизвестное поле.")
+            return
+        fsm = get_context(user_id)
+        await fsm.set_state("admin:edit_profile")
+        await fsm.update_data(edit_kind=kind, edit_target=target, edit_field=field)
+        back = f"a:{kind}:edit:{target}"
+        await _Reply(client, user_id).send(
+            f"Введите новое значение: <b>{_PROFILE_FIELDS[field]}</b>",
+            keyboard=[[callback_button("❌ Отмена", back)]])
+
+    async def st_edit_profile(client, user_id, update, ctx):
+        fsm = get_context(user_id)
+        text = (update.message.text or "").strip()
+        data = await fsm.get_data()
+        field = data.get("edit_field")
+        kind = data.get("edit_kind") or "pass"
+        try:
+            target = int(data.get("edit_target") or 0)
+        except (TypeError, ValueError):
+            target = 0
+        back = f"a:pass:manage:{target}" if kind == "pass" else f"a:drv:manage:{target}"
+        if field not in _PROFILE_FIELDS or not target:
+            await fsm.clear()
+            await _Reply(client, user_id).send(
+                "❌ Редактирование прервано.",
+                keyboard=[[callback_button(BACK, "a:menu")]])
+            return
+        if not text:
+            await _Reply(client, user_id).send("❌ Пустое значение не сохраняю. Введите текст.")
+            return
+        try:
+            S.edit_user_profile(target, **{field: text})
+        except ValueError as exc:
+            await _Reply(client, user_id).send(f"❌ {exc}")
+            return
+        await fsm.clear()
+        await _Reply(client, user_id).send(
+            "✅ Сохранено.",
+            keyboard=[[callback_button("🛠 К карточке", back)]])
 
     # ==================== УПРАВЛЕНИЕ ТАРИФАМИ ====================
     from core import tariff_manager as TM
@@ -1637,7 +1723,8 @@ def register_admin(router: Router) -> None:
             "reverify": reverify_driver, "manage": driver_manage, "block": driver_block_menu,
             "unblock": driver_unblock, "setprio": driver_setprio, "remprio": driver_remprio,
             "balance": driver_balance, "topup": driver_topup, "search": driver_search,
-            "delconf": driver_delconf, "del": driver_del, "unlim": driver_unlim,
+            "delconf": driver_delconf, "del": driver_del, "edit": profile_edit_menu,
+            "field": profile_edit_ask, "unlim": driver_unlim,
             "resetacc": driver_resetacc, "add": driver_add_start,
         }
         parts = p.split(":")
@@ -1668,7 +1755,8 @@ def register_admin(router: Router) -> None:
         if action == "blockdo":
             await passenger_block_do(client, user_id, update, {}); return
         routes = {"manage": passenger_manage, "block": passenger_block_menu, "unblock": passenger_unblock,
-                  "add": passenger_add_start, "delconf": passenger_delconf, "del": passenger_del}
+                  "add": passenger_add_start, "delconf": passenger_delconf, "del": passenger_del,
+                  "edit": profile_edit_menu, "field": profile_edit_ask}
         fn = routes.get(action)
         if fn:
             await fn(client, user_id, update, {})
@@ -2263,5 +2351,6 @@ def register_admin(router: Router) -> None:
         ("admin:add_driver_name", st_add_driver_name),
         ("admin:add_passenger_phone", st_add_passenger_phone),
         ("admin:add_passenger_name", st_add_passenger_name),
+        ("admin:edit_profile", st_edit_profile),
     ]:
         router.on_state(_state)(_fn)
