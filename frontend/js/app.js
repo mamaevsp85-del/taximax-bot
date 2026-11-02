@@ -791,9 +791,16 @@
       if (!o) return "<h2>Текущие заказы</h2><p class=\"list-empty\">Нет активного рейса</p>";
       var actions = "";
       if (o.status === "accepted") actions = '<button class="btn" data-act="arrived" data-id="' + o.id + '">Я прибыл</button>';
-      // Кнопки «Ожидание» больше нет: таймер стартует автоматически при «Я прибыл».
+      // Прибыл: таймер уже идёт автоматически, кнопка «Ожидание» не нужна.
       if (o.status === "driver_arrived") actions = '<button class="btn" data-act="start-trip" data-id="' + o.id + '">Начать движение</button>';
-      if (o.status === "in_progress") actions = '<button class="btn" data-act="complete" data-id="' + o.id + '">Завершить поездку</button>';
+      // В ПУТИ: кнопка «Ожидание» — водитель может отметить ожидание
+      // (пассажир просит подождать / остановка по пути).
+      if (o.status === "in_progress") {
+        var wNow = o.waiting || {};
+        var waitLabel = wNow.running ? "⏸ Остановить ожидание" : "⏳ Ожидание";
+        actions = '<button class="btn" data-act="wait" data-id="' + o.id + '">' + waitLabel + '</button>' +
+          '<button class="btn" data-act="complete" data-id="' + o.id + '">Завершить поездку</button>';
+      }
       var waitBox = (o.status === "driver_arrived" || o.status === "in_progress")
         ? waitingCard(o, "driver") : "";
       if (waitBox) setTimeout(startWaitingTicker, 0);
@@ -1744,7 +1751,21 @@
       sheet("<h2>" + title + "</h2><div class=\"chat\">" + (bubbles || '<p class="muted">Пока пусто</p>') + "</div>" +
         field("msg", "Текст", "", "") + '<button class="btn" data-act="send-msg" data-id="' + picked + '">Отправить</button>');
     },
-    "send-msg": function (el) { closeSheet(); run({ op: "order.chat", id: Number(el.dataset.id), text: val("msg") }); },
+    "send-msg": function (el) {
+      var oid = Number(el.dataset.id);
+      var text = val("msg");
+      if (!text) { toast("Введите текст"); return; }
+      closeSheet();
+      api("/api/act", { op: "order.chat", id: oid, text: text }).then(function (data) {
+        // Запоминаем СВОЁ сообщение: всплывающее окно показываем только
+        // на входящие, а свои помечаем здесь (в т.ч. когда пассажир и
+        // водитель — один и тот же аккаунт при тесте).
+        noteMyMessage(oid, (data && data.chat) || []);
+        if (data && data.state) S = normalizeState(data.state);
+        render();
+        toast("Отправлено");
+      }).catch(function (e) { toast(e.message); });
+    },
     "max-chat": function (el) {
       // Связь через приложение: открываем переписку внутри заказа.
       // Внешняя ссылка на профиль MAX (https://max.ru/id<uid>) устарела —
@@ -2225,6 +2246,31 @@
   };
 
   var _chatSeen = {};
+  // Подписи сообщений, отправленных С ЭТОГО устройства — их не показываем
+  // во всплывающем окне. Раньше фильтр был по user_id: если пассажир и
+  // водитель — один аккаунт (тест), уведомления не приходили вообще.
+  var _myChatSent = {};
+  var _chatCursor = "";        // ISO-время последнего полученного сообщения
+  var _chatPolling = false;
+  var _chatReady = false;      // первый опрос только задаёт курсор
+  var _lastPopupAt = {};       // order_id -> время последнего окна (антидубль)
+
+  function chatSig(m) {
+    if (!m) return "";
+    return String(m.at || "") + "|" + String(m.from || "") + "|" + String(m.text || "");
+  }
+
+  function noteMyMessage(orderId, chat) {
+    var list = chat || [];
+    var last = list.length ? list[list.length - 1] : null;
+    if (!last) return;
+    var sig = chatSig(last);
+    _myChatSent[orderId] = _myChatSent[orderId] || {};
+    _myChatSent[orderId][sig] = true;
+    _chatSeen[orderId] = { n: list.length, sig: sig };
+    // Своё сообщение не должно всплывать уведомлением — сдвигаем курсор.
+    if (last.at && last.at > _chatCursor) _chatCursor = last.at;
+  }
 
   function openDialog(orderId) {
     picked = Number(orderId);
@@ -2234,9 +2280,60 @@
     if (actions["sheet-chat"]) actions["sheet-chat"]({ dataset: { id: String(orderId) } });
   }
 
+  // Опрос новых сообщений через /api/chat/updates.
+  // Надёжнее сравнения /api/state: там чат мог не обновиться
+  // (пропуск при inflight, другая роль, ограничение выборки заказов).
+  function pollChat() {
+    if (!S || !S.user || !S.user.id) return;
+    if (_chatPolling) return;
+    _chatPolling = true;
+    var url = "/api/chat/updates?uid=" + encodeURIComponent(S.user.id);
+    if (_chatCursor) url += "&after=" + encodeURIComponent(_chatCursor);
+    api(url).then(function (data) {
+      _chatPolling = false;
+      if (!data || data.ok === false) return;
+      var msgs = data.messages || [];
+      if (!_chatReady) {
+        // Первый опрос: только запоминаем курсор, старую историю не показываем.
+        _chatReady = true;
+        var lastAt = "";
+        for (var q = 0; q < msgs.length; q++) {
+          if (msgs[q] && msgs[q].at && msgs[q].at > lastAt) lastAt = msgs[q].at;
+        }
+        _chatCursor = lastAt || data.server_time || "";
+        return;
+      }
+      if (!msgs.length) return;
+      var me = String(S.user.id || "");
+      var role = S.user.role;
+      var grouped = {};
+      var orderIds = [];
+      for (var i = 0; i < msgs.length; i++) {
+        var m = msgs[i];
+        if (!m || !m.text) continue;
+        if (m.at && m.at > _chatCursor) _chatCursor = m.at;
+        // своё сообщение (отправлено с этого устройства) — пропускаем
+        var own = (_myChatSent[m.order_id] || {})[chatSig(m)];
+        if (own) continue;
+        if (!grouped[m.order_id]) { grouped[m.order_id] = []; orderIds.push(m.order_id); }
+        grouped[m.order_id].push(m.text);
+      }
+      for (var k = 0; k < orderIds.length; k++) {
+        var oid = orderIds[k];
+        var texts = grouped[oid];
+        _lastPopupAt[oid] = Date.now();
+        taxiBeep();
+        showMsgPopup(texts.join(" "),
+          (role === "driver" ? "Пассажир" : "Водитель") + " · заказ #" + oid,
+          (function (id) { return function () { openDialog(id); }; })(oid));
+      }
+    }).catch(function () { _chatPolling = false; });
+  }
+
   function checkIncomingChat(norm) {
+    // Резервный путь: если /api/chat/updates недоступен — сравниваем
+    // состояние, как раньше (по числу сообщений и подписи последнего).
     if (!norm || !norm.user) return;
-    var me = String(norm.user.id || "");
     var role = norm.user.role;
     var orders = [];
     if (role === "driver") {
@@ -2252,26 +2349,25 @@
       seenIds[o.id] = true;
       var chat = o.chat || [];
       var last = chat.length ? chat[chat.length - 1] : null;
-      var sig = last ? String(last.at || "") + "|" + String(last.from || "") + "|" + String(last.text || "") : "";
+      var sig = chatSig(last);
       var prev = _chatSeen[o.id];
       _chatSeen[o.id] = { n: chat.length, sig: sig };
       if (!prev || prev.sig === sig) continue;
       var start = chat.length > prev.n ? prev.n : Math.max(0, chat.length - 1);
+      var mine = _myChatSent[o.id] || {};
       var lines = [];
       var fresh = chat.slice(start);
       for (var j = 0; j < fresh.length; j++) {
         var m = fresh[j];
-        if (!m || String(m.from) === me) continue;
-        if (m.text) lines.push(m.text);
+        if (!m || !m.text) continue;
+        if (mine[chatSig(m)]) continue;
+        lines.push(m.text);
       }
       if (!lines.length) continue;
-      var who = role === "driver" ? "Пассажир" : "Водитель";
-      var orderId = o.id;
       taxiBeep();
-      // ВАЖНО: всплывающее окно сообщения не исчезает само —
-      // закрывается крестиком или открывает диалог по нажатию.
-      showMsgPopup(lines.join(" "), who + " · заказ #" + orderId,
-        function () { openDialog(orderId); });
+      showMsgPopup(lines.join(" "),
+        (role === "driver" ? "Пассажир" : "Водитель") + " · заказ #" + o.id,
+        (function (id) { return function () { openDialog(id); }; })(o.id));
     }
   }
 
@@ -2448,10 +2544,19 @@
       // Иначе fav-offer рендерится со старым состоянием, где завершённого
       // заказа ещё нет, и детали поездки показываются пустыми.
       S = normalizeState(data);
-      checkStatusChanges(data);
-      checkIncomingChat(S);
+      // Смена статусов и чат — независимо: если один упадёт,
+      // второй всё равно отработает (иначе уведомления терялись).
+      try { checkStatusChanges(data); } catch (e) {}
+      try { checkIncomingChat(S); } catch (e) {}
     }).catch(function () {});
   }, 5000);
+
+  // Отдельный частый опрос чата: всплывающие окна о новых сообщениях.
+  setInterval(function () {
+    if (!S || !S.user || !S.user.id) return;
+    try { pollChat(); } catch (e) {}
+  }, 3000);
+
 
   function showPeople() {
     api("/api/people").then(function (data) {

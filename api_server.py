@@ -73,7 +73,7 @@ async def auth_middleware(request, handler):
         return await handler(request)
     # Allow public endpoints without auth
     public_paths = ('/health', '/se14566736_bot', '/ws', '/api/state', '/api/act', '/api/whoami',
-                    '/api/photo')
+                    '/api/photo', '/api/chat/updates')
     if path in public_paths or path.startswith('/api/photo/'):
         return await handler(request)
     # Локальная разработка: список профилей и статус пользователя открыты
@@ -699,6 +699,65 @@ async def webhook_handler(request):
         return web.json_response({'status': 'error'}, status=500)
 
 
+async def chat_updates(request):
+    """Новые сообщения чата по заказам пользователя.
+
+    Отдельный лёгкий эндпоинт для уведомлений: клиент опрашивает его каждые
+    3 секунды и показывает всплывающее окно на каждое НОВОЕ сообщение.
+    Надёжнее, чем сравнивать полный /api/state (тот может не обновиться,
+    если параллельно идёт другой запрос или роль переключена).
+
+    Параметры: uid (или cookie/токен), after — ISO-время последнего
+    полученного сообщения (курсор). Возвращает сообщения новее after.
+    """
+    try:
+        uid = _resolve_uid(request)
+        if not uid:
+            return web.json_response({'ok': True, 'messages': [], 'server_time':
+                                      datetime.now().isoformat()})
+        after_raw = request.query.get('after') or ''
+        try:
+            after = datetime.fromisoformat(after_raw) if after_raw else None
+        except ValueError:
+            after = None
+        messages = []
+        now_iso = datetime.now().isoformat()
+        # Обходим все заказы напрямую: get_orders() по умолчанию режет до 50,
+        # а чат может быть в старом заказе.
+        all_orders = list((storage.storage.orders or {}).values())
+        for order in all_orders:
+            if uid not in (order.get('passenger_id'), order.get('driver_id')):
+                continue
+            for m in (order.get('chat') or []):
+                when = m.get('at') or ''
+                if not when:
+                    continue
+                if after is not None:
+                    try:
+                        if datetime.fromisoformat(when) <= after:
+                            continue
+                    except ValueError:
+                        pass
+                sender = m.get('from')
+                try:
+                    sender_int = int(sender)
+                except (TypeError, ValueError):
+                    sender_int = 0
+                messages.append({
+                    'order_id': order.get('id'),
+                    'from': sender_int,
+                    'text': m.get('text') or '',
+                    'at': when,
+                })
+        messages.sort(key=lambda x: x.get('at') or '')
+        return web.json_response({'ok': True, 'messages': messages[-30:],
+                                  'server_time': now_iso})
+    except Exception as exc:
+        logger.exception("Chat updates error")
+        return web.json_response({'ok': False, 'error': str(exc),
+                                  'messages': []}, status=500)
+
+
 async def serve_frontend(request):
     try:
         path = request.path
@@ -727,7 +786,12 @@ async def serve_frontend(request):
         content_type = content_types.get(ext, 'application/octet-stream')
         with open(file_path, 'rb') as f:
             data = f.read()
-        return web.Response(body=data, content_type=content_type, charset='utf-8')
+        resp = web.Response(body=data, content_type=content_type, charset='utf-8')
+        # НЕ кэшируем: иначе после обновления кода в приложении остаётся
+        # старая версия app.js/app.css и правки «не приходят».
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        return resp
     except Exception as exc:
         logger.exception("Serve frontend error")
         return web.Response(status=500, text=f'Error: {exc}')
@@ -754,6 +818,7 @@ def create_app():
     app.router.add_post('/api/act', api_act)
     app.router.add_post('/api/photo', photo_upload)
     app.router.add_get('/api/photo/{user_id}', photo_get)
+    app.router.add_get('/api/chat/updates', chat_updates)
     app.router.add_get('/api/people', api_people)
     # Registration endpoints
     app.router.add_post('/api/users/register', users_register)
