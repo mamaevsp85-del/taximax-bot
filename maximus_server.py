@@ -43,7 +43,7 @@ from core.driver_support import (  # noqa: E402
     generate_google_navigation_url,
 )
 from core import geocoder  # noqa: E402
-from core.areas import group_orders_by_area  # noqa: E402
+from core.areas import group_orders_by_area, ALL_SETTLEMENTS  # noqa: E402
 import httpx  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -540,6 +540,61 @@ async def geo_cached(address: str):
     return coords, city
 
 
+async def geo_in_city(address: str, city: str = ""):
+    """Геокодит адрес С ПРИОРИТЕТОМ города и проверяет точность.
+
+    Главная причина «такси поехало не туда»: «Мира 1» искалось по всей
+    стране и находилось во Владимире или Костроме. Теперь сначала ищем
+    «адрес, город пассажира», и только если там ничего нет (или в адресе
+    явно назван другой город) — ищем как написал пассажир.
+    """
+    text = (address or "").strip()
+    city = (city or "").strip()
+    if not text:
+        return None, ""
+    if not city:
+        return await geo_cached(text)
+    # Город уже назван в адресе (свой или чужой) — ищем ровно как написали.
+    if _city_mentioned(text, city) or _has_explicit_other_city(text, city):
+        return await geo_cached(text)
+    coords, found_city = await geo_cached(f"{text}, {city}")
+    if coords:
+        # Если Яндексу пришлось искать далеко — адрес в этом городе не найден.
+        center = await geocoder.city_center(city)
+        if center:
+            far = _haversine(center["lat"], center["lon"], coords["lat"], coords["lon"])
+            if far > 60:
+                return await geo_cached(text)
+        return coords, found_city or city
+    return await geo_cached(text)
+
+
+async def geo_checked(address: str, city: str = ""):
+    """Геокодинг с проверкой, что найден именно адрес, а не «просто город».
+
+    Защита от молчаливого «такси поехало не туда»: если в адресе есть
+    улица и/или дом, а геокодер вернул только населённый пункт
+    (precision = other/region/country), считаем адрес не найденным.
+    """
+    text = (address or "").strip()
+    if not text:
+        return None, ""
+    wants_street = len(text) >= 6 or any(ch.isdigit() for ch in text)
+    coords, found_city = await geo_in_city(text, city)
+    if not coords:
+        return None, ""
+    if not wants_street:
+        return coords, found_city
+    try:
+        _c, _city, precision = await geocoder.geocode_precise(
+            f"{text}, {city}" if city and not _city_mentioned(text, city) else text)
+    except Exception:
+        return coords, found_city
+    if precision in ("other", "region", "country", "area", "district", "locality"):
+        return None, found_city
+    return coords, found_city
+
+
 async def route_fast(points: list) -> tuple:
     """Короткий маршрут: повтор из памяти, иначе OSRM не дольше 1.2 с, иначе прямая."""
     key = tuple((round(lat, 4), round(lon, 4)) for lat, lon in points)
@@ -565,11 +620,39 @@ async def route_fast(points: list) -> tuple:
     return result
 
 
+def _stops_list(stop: str = "", stops=None) -> list:
+    """Остановки маршрута: список адресов без пустых и повторов.
+
+    Поддерживаем и старый ``stop`` (одна остановка), и новый ``stops``
+    (несколько промежуточных точек) — Mini-App шлёт список.
+    """
+    raw = []
+    if isinstance(stops, (list, tuple)):
+        raw.extend(stops)
+    elif isinstance(stops, str) and stops.strip():
+        raw.append(stops)
+    if isinstance(stop, str) and stop.strip():
+        raw.append(stop)
+    result = []
+    seen = set()
+    for item in raw:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
 def quote(pickup: str, dest: str, stop: str = "",
           pickup_coords: dict | None = None,
           dest_coords: dict | None = None,
           pickup_city: str = "",
-          destination_city: str = "") -> dict:
+          destination_city: str = "",
+          stops=None) -> dict:
     """Расчёт маршрута и цены.
 
     ``pickup_city``/``destination_city`` — подсказка города (например, из
@@ -589,21 +672,24 @@ def quote(pickup: str, dest: str, stop: str = "",
 
         # Подача и назначение ищутся одновременно: так расчёт не ждёт
         # два запроса к геокодеру друг за другом.
+        # ВАЖНО: поиск идёт С ПРИВЯЗКОЙ К ГОРОДУ — иначе «Мира 1»
+        # находится во Владимире, и такси «едет не туда».
         if pc is None and dc is None:
             (pc, gcity1), (dc, gcity2) = await asyncio.gather(
-                geo_cached(pickup), geo_cached(dest))
+                geo_checked(pickup, city1),
+                geo_checked(dest, city2 or city1))
             city1 = city1 or gcity1
             city2 = city2 or gcity2
         elif pc is None:
-            pc, gcity1 = await geo_cached(pickup)
+            pc, gcity1 = await geo_checked(pickup, city1)
             city1 = city1 or gcity1
         elif dc is None:
-            dc, gcity2 = await geo_cached(dest)
+            dc, gcity2 = await geo_checked(dest, city2 or city1)
             city2 = city2 or gcity2
         if not pc:
-            raise ValueError("Не удалось найти адрес подачи")
+            raise ValueError(f"Не нашли адрес подачи «{pickup}». Уточните улицу и дом.")
         if not dc:
-            dc, gcity2 = await geo_cached(dest)
+            dc, gcity2 = await geo_checked(dest, city1 or city2)
             city2 = city2 or gcity2
         if pc and not city1 and dc and not city2:
             city1, city2 = await asyncio.gather(
@@ -628,7 +714,7 @@ def quote(pickup: str, dest: str, stop: str = "",
                 if alt:
                     dc, city2 = alt, (alt_city or city1)
         if not dc:
-            raise ValueError("Не удалось найти адрес назначения")
+            raise ValueError(f"Не нашли адрес назначения «{dest}». Уточните улицу и дом.")
         if not city2:
             city2 = await _city_by_coords(dc["lat"], dc["lon"])
 
@@ -644,12 +730,17 @@ def quote(pickup: str, dest: str, stop: str = "",
                     f"Адрес «{dest}» найден слишком далеко ({far:.0f} км). "
                     f"Укажите город и улицу точнее.")
 
+        stop_list = _stops_list(stop, stops)
         wps = []
-        if stop:
-            sc, _scity = await geo_cached(stop)
-            if not sc:
-                raise ValueError("Не удалось найти остановку")
-            wps.append({"text": stop, "lat": sc["lat"], "lon": sc["lon"]})
+        if stop_list:
+            # Все остановки геокодируются ОДНОВРЕМЕННО и с привязкой к городу:
+            # 3 точки — не 3 последовательных запроса, а один пакет.
+            found = await asyncio.gather(
+                *[geo_in_city(text, city1 or city2) for text in stop_list])
+            for text, (coords, _city) in zip(stop_list, found):
+                if not coords:
+                    raise ValueError(f"Не удалось найти остановку «{text}»")
+                wps.append({"text": text, "lat": coords["lat"], "lon": coords["lon"]})
 
         points = [(pc["lat"], pc["lon"])] + [(w["lat"], w["lon"]) for w in wps] + [(dc["lat"], dc["lon"])]
         dist, minutes = await route_fast(points)
@@ -662,6 +753,7 @@ def quote(pickup: str, dest: str, stop: str = "",
         )
         return {
             "pickup": pickup, "destination": dest, "stop": stop,
+            "stops": [w["text"] for w in wps],
             "pickup_city": city1, "destination_city": dest_city,
             "pickup_coords": pc, "destination_coords": dc,
             "waypoints": wps, "km": round(float(dist), 1),
@@ -831,12 +923,23 @@ def _city_mentioned(text: str, city: str) -> bool:
     return city.strip().lower() in text.lower()
 
 
-# Известные города зоны обслуживания — чтобы распознать явно указанный город
-KNOWN_CITIES = (
+# Известные города и посёлки зоны обслуживания — чтобы распознать
+# явно указанный пассажиром город (Хакасия + юг Красноярского края).
+_BASE_CITIES = (
     "абакан", "черногорск", "минусинск", "саяногорск", "аскиз",
     "усть-абакан", "бейский", "подсинцовка", "вершина теи", "копьёво",
-    "копьево", "сорск", "шарыпово", "красноярск", "кызыл",
+    "копьево", "сорск", "шарыпово", "красноярск", "кызыл", "майна",
+    "черёмушки", "черемушки", "абаза", "боград", "шира", "таштып",
+    "шушенское", "ермаковское", "каратузское", "идринское",
+    "краснотуранск", "курагино", "артёмовск", "артемовск",
+    "кошурниково", "селиваниха", "зелёный бор", "зеленый бор",
+    "белый яр", "пригорск", "калинино", "усть-бюр", "изыхские копи",
 )
+
+KNOWN_CITIES = tuple(sorted(
+    set(_BASE_CITIES) | {c.strip().lower() for c in ALL_SETTLEMENTS if c},
+    key=len, reverse=True,
+))
 
 
 def _has_explicit_other_city(text: str, own_city: str) -> bool:
@@ -1281,13 +1384,17 @@ def act(uid: int, body: dict) -> dict:
         return {"ok": True, "profile_complete": _profile_complete(u),
                 "needs_onboarding": _needs_onboarding(u)}
     if op == "quote":
+        # Город подачи по умолчанию — родной город пассажира: иначе «Мира 1»
+        # геокодер может найти во Владимире и применить чужой тариф.
+        home_city = (S.get_user(uid) or {}).get("home_city") or ""
         return {"ok": True, "draft": quote(
             body.get("pickup", ""), body.get("destination", ""),
             body.get("stop", ""),
             pickup_coords=body.get("pickup_coords"),
-            dest_coords=body.get("dest_coords") or body.get("destination_coords"),
-            pickup_city=body.get("pickup_city", ""),
+            dest_coords=body.get("dest_coords") or body.get("destination_coordinates"),
+            pickup_city=body.get("pickup_city") or home_city,
             destination_city=body.get("destination_city", ""),
+            stops=body.get("stops"),
         )}
     if op == "order.create":
         # Заказ нельзя создать, пока не пройдено знакомство

@@ -61,3 +61,6 @@ tunnel_key.pub
 *.pem
 tools/OpenSSH-Win64/
 tools/cloudflared.exe
+
+# Локальные бэкапы перед крупными правками
+backups/

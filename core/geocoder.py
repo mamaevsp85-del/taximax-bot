@@ -200,6 +200,51 @@ def short_address(components) -> str:
     return ", ".join(p for p in (city, street) if p)
 
 
+async def geocode_precise(address: str) -> Tuple[Optional[dict], str, str]:
+    """Геокодирует адрес и возвращает ТОЧНОСТЬ привязки.
+
+    Возвращает (coords, city, precision), где precision — значение
+    ``GeocoderMetaData.precision``: ``exact``/``number``/``near``/``range``
+    для дома, ``street`` для улицы, ``other`` — когда найдена только
+    страна/регион/город (то есть адреса фактически нет).
+    """
+    if not address or not address.strip():
+        return None, "", ""
+    key = " ".join(address.lower().split())
+    cache_key = ("precise", key)
+    cached = _GEOCODE_CACHE.get(cache_key)
+    if cached and (time.time() - cached[0]) < _GEOCODE_TTL:
+        return cached[1], cached[2], cached[3]
+    try:
+        params = {
+            "apikey": settings.yandex_api_key,
+            "geocode": address,
+            "format": "json",
+            "results": 1,
+        }
+        data = await _fetch_json(settings.yandex_geocoder_url, params)
+    except Exception as exc:
+        logger.error("Ошибка геокодирования '%s': %s", address, exc)
+        return None, "", ""
+    try:
+        members = data["response"]["GeoObjectCollection"]["featureMember"]
+        if not members:
+            return None, "", ""
+        geo = members[0]["GeoObject"]
+        pos = geo["Point"]["pos"].split()
+        lon, lat = float(pos[0]), float(pos[1])
+        meta = geo.get("metaDataProperty", {}).get("GeocoderMetaData", {})
+        addr = meta.get("Address", {})
+        city = _extract_city(addr.get("Components", []))
+        precision = (meta.get("precision") or "").strip().lower()
+        coords = {"lat": lat, "lon": lon}
+        _GEOCODE_CACHE[cache_key] = (time.time(), coords, city, precision)
+        return coords, city, precision
+    except (KeyError, IndexError, ValueError, TypeError) as exc:
+        logger.error("Не удалось разобрать ответ геокодера: %s", exc)
+        return None, "", ""
+
+
 async def geocode_address(address: str) -> Tuple[Optional[dict], str]:
     """
     Геокодирует адрес. Возвращает (coords, city):

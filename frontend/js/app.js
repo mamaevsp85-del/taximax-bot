@@ -636,7 +636,7 @@
         return '<button data-act="use-fav" data-index="' + i + '">' + esc((f.label || "Маршрут").slice(0, 18)) + "</button>";
       }).join("");
       return '<section class="hero"><p class="eyebrow">Куда поедем</p>' +
-        '<button class="where" data-act="start"><span class="pin"></span><span>Создать поездку</span><span class="go">→</span></button>' +
+        '<button class="where" data-act="start"><span class="pin"></span><span>Заказать такси</span><span class="go">→</span></button>' +
         '<div class="chips">' + chips + "</div></section>" +
         (active ? '<div class="card"><div class="row"><b>Заказ #' + active.id + "</b>" + badge(active.status) + "</div>" +
           '<button class="btn yellow" data-act="open-order" data-id="' + active.id + '">Открыть</button></div>' : "") +
@@ -651,28 +651,73 @@
         "</div>";
     },
     trip: function () {
-      var step = (draft && draft.step) || 1;
-      var bars = [1, 2, 3].map(function (n) { return '<i class="' + (n <= step ? "on" : "") + '"></i>'; }).join("");
-      if (step === 1) return "<h2>Адрес подачи</h2><div class=\"steps\">" + bars + "</div>" + field("pickup", "Откуда", draft && draft.pickup, "Город, улица, дом") +
-        geoBtn("pickup") +
-        field("entrance", "Подъезд", draft && draft.entrance, "номер, если есть") +
-        '<button class="btn" data-act="pickup-next">Дальше</button>';
-      if (step === 2) return "<h2>Куда</h2><div class=\"steps\">" + bars + "</div><p class=\"muted\">Подача: " + esc(pickupLine(draft)) + "</p>" +
-        field("dest", "Назначение", draft.destination, "Город, улица, дом") + geoBtn("dest") +
-        '<button class="btn" data-act="dest-next">Посчитать</button>';
-      if (draft.pending) return "<h2>Подтверждение</h2><div class=\"steps\">" + bars + "</div><div class=\"card\" style=\"margin-top:0\"><div class=\"route\">" +
-        esc(draft.pickup) + "<small>" + esc(draft.destination) + "</small></div><p class=\"muted\">Считаю маршрут…</p></div>";
-      var fromFav = draft.favoriteIndex != null
-        ? '<button class="btn ghost" data-act="edit-fav" data-index="' + draft.favoriteIndex + '">Изменить адреса</button>'
+      var d = draft || (draft = {});
+      var stops = d.stops || [];
+      var ready = !!(d.pickup && d.destination);
+      var busy = !!d.pending;
+      // Заголовок шага: пока адресов нет — «Куда едем», иначе подтверждение.
+      var title = ready ? "Проверьте заказ" : "Куда едем?";
+      var cityLine = function (label, city) {
+        return label + (city ? ' · ' + esc(city) : "");
+      };
+      var intercity = !!(d.pickup_city && d.destination_city &&
+        String(d.pickup_city).toLowerCase() !== String(d.destination_city).toLowerCase());
+
+      var pickupBlock = d.pickup
+        ? '<div class="of-row of-pickup">' +
+            '<i class="of-pin"></i><span class="of-txt" data-act="of-edit-pickup"><small>' +
+            cityLine("Откуда", d.pickup_city) + "</small><b>" +
+            esc(pickupLine(d)) + "</b></span>" +
+            '<button type="button" class="of-geo" data-act="my-geo" data-field="pickup" title="Моё место">📍</button>' +
+            '<em data-act="of-edit-pickup">изменить ›</em></div>'
+        : '<div class="of-row of-pickup">' + field("pickup", "Откуда", "", "Город, улица, дом") +
+            geoBtn("pickup") + "</div>";
+
+      var destBlock = d.destination
+        ? '<div class="of-row of-dest"><i class="of-flag"></i>' +
+            '<span class="of-txt" data-act="of-edit-dest"><small>' + cityLine("Куда", d.destination_city) +
+            "</small><b>" + esc(d.destination) +
+            '</b></span><em data-act="of-edit-dest">изменить ›</em></div>'
+        : '<div class="of-row of-dest">' + field("dest", "Куда", "", "Улица и дом — город подставим сам") +
+            "</div>";
+
+      // Остановки — инлайн, без модального окна.
+      var stopsHtml = stops.map(function (s, i) {
+        return '<div class="of-stop"><span class="of-stop-n">' + (i + 1) + "</span>" +
+          '<input id="stop' + i + '" data-stop="' + i + '" value="' + esc(s) + '" placeholder="Остановка по пути">' +
+          '<button type="button" class="of-x" data-act="of-del-stop" data-i="' + i + '">✕</button></div>';
+      }).join("");
+      var addStop = stops.length < 3
+        ? '<button type="button" class="of-add" data-act="of-add-stop">＋ Остановка по пути</button>'
         : "";
-      return "<h2>Подтверждение</h2><div class=\"steps\">" + bars + "</div><div class=\"card\" style=\"margin-top:0\"><div class=\"route\">" +
-        esc(pickupLine(draft)) + (draft.stop ? "<small>через " + esc(draft.stop) + "</small>" : "") + "<small>" + esc(draft.destination) +
-        '</small></div><div class="row" style="margin-top:12px"><span class="muted">' + draft.km + " км · ~" + draft.minutes +
-        ' мин</span><div class="price">' + money(draft.price) + "</div></div></div>" +
-        '<button class="btn" data-act="confirm">Подтвердить заказ</button>' +
-        '<button class="btn ghost" data-act="edit-route">Изменить маршрут</button>' +
-        '<div class="btn-row"><button class="btn ghost" data-act="sheet-price">Своя цена</button><button class="btn ghost" data-act="sheet-stop">Остановка</button></div>' +
-        fromFav;
+
+      var entranceLine = d.entrance
+        ? '<button type="button" class="chip on" data-act="of-entrance">Подъезд ' + esc(d.entrance) + "</button>"
+        : '<button type="button" class="chip" data-act="of-entrance">Подъезд</button>';
+
+      var summary = tripSummaryHtml();
+      var extra = ready
+        ? '<div class="btn-row"><button class="btn ghost" data-act="sheet-price">Своя цена</button>' +
+          entranceLine + "</div>"
+        : "";
+
+      // Быстрые маршруты: одно нажатие заполняет оба адреса.
+      var favs = (S.passenger && S.passenger.favorites) || [];
+      var quick = "";
+      if (!ready && favs.length) {
+        quick = '<div class="of-quick">' + favs.slice(0, 3).map(function (f, i) {
+          return '<button type="button" data-act="use-fav" data-index="' + i + '">⭐ ' +
+            esc((f.label || (f.destination || "Маршрут")).slice(0, 20)) + "</button>";
+        }).join("") + "</div>";
+      }
+
+      return "<h2>" + title + "</h2>" +
+        quick +
+        '<div class="of">' + pickupBlock + stopsHtml + destBlock + addStop + "</div>" +
+        '<div id="trip-sum">' + summary + "</div>" +
+        '<p class="muted of-hint">' + (ready
+          ? "Проверьте адреса и нажмите «Заказать» — водитель увидит их сразу."
+          : "Город подставляется автоматически — писать «г. Черногорск» не нужно.") + "</p>";
     },
     live: function () {
       var o = (S.passenger.orders || []).filter(function (x) { return String(x.id) === String(picked); })[0] || S.passenger.active;
@@ -1506,6 +1551,11 @@
     render();
     var input = document.getElementById(inputId);
     if (input) input.value = address;
+    // Оба адреса известны — сразу считаем цену (минимум действий).
+    if (draft && draft.pickup && draft.destination && screen === "trip") {
+      draft._quoteKey = "";
+      quoteDraft();
+    }
     toast("Адрес подставлен");
   }
 
@@ -1664,8 +1714,13 @@
         var icon = it.kind === "house" ? "\uD83C\uDFE0"
                  : it.kind === "street" ? "\uD83D\uDEE3"
                  : "\uD83D\uDCCD";
+        // Заголовок и город — отдельно: так видно, ЧТО именно выбираешь
+        // («Мира 1» в Черногорске или в другом регионе).
+        var head = it.title || fullAddress(it);
+        var tail = it.subtitle || "";
         html += '<button type="button" class="suggest-item" data-i="' + i + '">' +
-          "<i>" + icon + "</i><span>" + esc(fullAddress(it)) + "</span></button>";
+          "<i>" + icon + "</i><span><b>" + esc(head) + "</b>" +
+          (tail ? "<small>" + esc(tail) + "</small>" : "") + "</span></button>";
       }
       box.innerHTML = html;
       box.hidden = false;
@@ -1716,6 +1771,142 @@
     });
   }
 
+  // ==================== ОДНОЭКРАННЫЙ ЗАКАЗ ====================
+  // Идея: минимум действий. Подача подставляется сама (последний адрес или
+  // GPS), пассажир вводит только «Куда». Как только оба адреса известны —
+  // цена считается автоматически, остаётся одно нажатие «Заказать».
+  function freshDraft() {
+    return {
+      step: 1, pickup: "", pickup_coords: null, pickup_city: "",
+      destination: "", dest_coords: null, destination_city: "",
+      stops: [], entrance: "", pending: false, price: 0, calc_price: 0,
+    };
+  }
+
+  function draftStops() {
+    return ((draft && draft.stops) || []).filter(function (s) {
+      return String(s || "").trim().length >= 3;
+    });
+  }
+
+  // Подача по умолчанию: последний адрес из истории -> иначе GPS -> иначе город.
+  function prefillPickup() {
+    if (!draft || draft.pickup) return;
+    var orders = (S && S.passenger && S.passenger.orders) || [];
+    for (var i = 0; i < orders.length; i++) {
+      var o = orders[i];
+      if (!o || !o.pickup) continue;
+      if (["completed", "cancelled"].indexOf(o.status) < 0) continue;
+      draft.pickup = o.pickup;
+      draft.pickup_coords = o.pickup_coords || null;
+      draft.pickup_city = o.pickup_city || (S.user.home_city || "");
+      render();
+      return;
+    }
+    var home = (S.user && S.user.home_city) || "";
+    if (home) draft.pickup_city = home;
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(function (pos) {
+        api("/api/act", { op: "geo.resolve", lat: pos.coords.latitude, lon: pos.coords.longitude })
+          .then(function (res) {
+            if (!draft || draft.pickup) return;
+            if (!res || !res.address) return;
+            draft.pickup = res.address;
+            draft.pickup_coords = { lat: res.lat, lon: res.lon };
+            if (res.city) draft.pickup_city = res.city;
+            render();
+          }).catch(function () {});
+      }, function () {}, { enableHighAccuracy: true, timeout: 6000, maximumAge: 120000 });
+    }
+  }
+
+  function paintSummary() {
+    var box = document.getElementById("trip-sum");
+    if (!box) { render(); return; }
+    box.innerHTML = tripSummaryHtml();
+  }
+
+  // Автоматический расчёт: вызывается сам, когда оба адреса известны.
+  var _quoteSeq = 0;
+  function quoteDraft(force, silent) {
+    if (!draft) return;
+    // Берём текущие значения из полей: пользователь мог не успеть «расфокусить»
+    // ввод, но адрес уже набран.
+    var pickup = String(draft.pickup || val("pickup") || "").trim();
+    var dest = String(draft.destination || val("dest") || "").trim();
+    if (pickup) draft.pickup = pickup;
+    if (dest) draft.destination = dest;
+    if (pickup.length < 3 || dest.length < 3) return;
+    var stops = draftStops();
+    var rawStops = (draft.stops || []).slice();
+    var key = pickup + "→" + dest + "→" + stops.join("|");
+    if (!force && draft._quoteKey === key && draft.price) return;
+    draft._quoteKey = key;
+    draft.pending = true;
+    var seq = ++_quoteSeq;
+    paintSummary();
+    api("/api/act", {
+      op: "quote",
+      pickup: pickup,
+      destination: dest,
+      stops: stops,
+      pickup_coords: draft.pickup_coords || null,
+      dest_coords: draft.dest_coords || draft.destination_coords || null,
+      pickup_city: draft.pickup_city || (S.user && S.user.home_city) || "",
+      destination_city: draft.destination_city || ""
+    }).then(function (data) {
+      if (seq !== _quoteSeq || !draft) return;
+      var fresh = (data && data.draft) || {};
+      fresh.entrance = draft.entrance || "";
+      fresh.favoriteIndex = draft.favoriteIndex;
+      fresh.pending = false;
+      fresh.step = 3;
+      fresh.calc_price = Number(fresh.price) || 0;
+      // Оставляем введённые строки остановок, чтобы поля не «прыгали».
+      if (rawStops.length) fresh.stops = rawStops;
+      else if (fresh.stops && fresh.stops.length) rawStops = fresh.stops.slice();
+      // Сохраняем «свою цену», если пассажир её уже поднял.
+      if (draft.calc_price && Number(draft.price) > Number(fresh.calc_price)) {
+        fresh.price = draft.price;
+        fresh.calc_price = draft.calc_price;
+      }
+      fresh._quoteKey = key;
+      draft = fresh;
+      render();
+    }).catch(function (e) {
+      if (seq !== _quoteSeq || !draft) return;
+      draft.pending = false;
+      draft.price = 0;
+      draft._quoteKey = "";
+      if (!silent) toast(e.message || "Не удалось посчитать маршрут");
+      render();
+    });
+  }
+
+  // Итог заказа (расстояние, цена, кнопка) — вынесено, чтобы автосчёт
+// обновлял только этот блок и не сбрасывал ввод адреса.
+  function tripSummaryHtml() {
+    var d = draft || {};
+    var ready = !!(d.pickup && d.destination);
+    if (!ready) return "";
+    var busy = !!d.pending;
+    var intercity = !!(d.pickup_city && d.destination_city &&
+      String(d.pickup_city).toLowerCase() !== String(d.destination_city).toLowerCase());
+    var mainBtn;
+    if (busy) {
+      mainBtn = '<button class="btn" disabled>Считаю стоимость…</button>';
+    } else if (d.price) {
+      mainBtn = '<button class="btn of-go" data-act="confirm">Заказать · ' + money(d.price) + "</button>";
+    } else {
+      mainBtn = '<button class="btn" data-act="of-recalc">Рассчитать стоимость</button>';
+    }
+    return '<div class="of-sum">' +
+      '<span>' + (d.km != null ? Number(d.km).toFixed(1) + " км" : "") +
+      (d.minutes ? " · ~" + d.minutes + " мин" : "") +
+      (intercity ? ' · <b class="tag">межгород</b>' : "") + "</span>" +
+      '<b>' + (busy ? "Считаю…" : money(d.price)) + "</b></div>" + mainBtn;
+  }
+
   function render() {
     if (S && S.user && S.user.role) {
       document.body.dataset.role = S.user.role;
@@ -1759,11 +1950,68 @@
 
     // Подключаем автодополнение адреса на нужных экранах
     if (screen === "trip") {
-      var step = (draft && draft.step) || 1;
-      if (step === 1) {
-        attachSuggest("pickup", function (it) { draft.pickup = fullAddress(it); });
-      } else if (step === 2) {
-        attachSuggest("dest", function (it) { draft.destination = fullAddress(it); });
+      // Автосчёт: как только оба адреса заполнены — цена сама появляется.
+      function autoQuote() {
+        clearTimeout(window._autoQuoteTimer);
+        window._autoQuoteTimer = setTimeout(function () { quoteDraft(); }, 350);
+      }
+      var pickupInput = document.getElementById("pickup");
+      if (pickupInput) {
+        attachSuggest("pickup", function (it) {
+          draft.pickup = fullAddress(it);
+          draft.pickup_coords = null;
+          autoQuote();
+        });
+        pickupInput.addEventListener("blur", function () {
+          var v = pickupInput.value.trim();
+          if (v.length >= 3) { draft.pickup = v; autoQuote(); }
+        });
+        pickupInput.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") { e.preventDefault(); autoQuote(); }
+        });
+      }
+      var destInput = document.getElementById("dest");
+      if (destInput) {
+        attachSuggest("dest", function (it) {
+          draft.destination = fullAddress(it);
+          draft.dest_coords = null;
+          autoQuote();
+        });
+        destInput.addEventListener("blur", function () {
+          var v = destInput.value.trim();
+          if (v.length >= 3) { draft.destination = v; autoQuote(); }
+        });
+        destInput.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") { e.preventDefault(); autoQuote(); }
+        });
+      }
+      // Промежуточные точки — обычные поля в списке, без отдельного окна.
+      var stopInputs = document.querySelectorAll("[data-stop]");
+      for (var si = 0; si < stopInputs.length; si++) {
+        (function (input) {
+          var idx = Number(input.dataset.stop);
+          attachSuggest(input.id, function (it) {
+            draft.stops = draft.stops || [];
+            draft.stops[idx] = fullAddress(it);
+            draft._quoteKey = "";
+            autoQuote();
+          });
+          input.addEventListener("blur", function () {
+            draft.stops = draft.stops || [];
+            draft.stops[idx] = input.value.trim();
+            autoQuote();
+          });
+        })(stopInputs[si]);
+      }
+      // Первый расчёт без ожидания, если адреса уже есть (избранное/повтор).
+      if (draft && draft.pickup && draft.destination && !draft.price) {
+        setTimeout(function () { quoteDraft(); }, 60);
+      }
+      // Фокус сразу в «Куда»: подача уже подставлена, вводить нужно только её.
+      if (draft && draft.pickup && !draft.destination && !window._tripFocused) {
+        window._tripFocused = true;
+        var needFocus = document.getElementById("dest");
+        if (needFocus) setTimeout(function () { try { needFocus.focus(); } catch (e) {} }, 80);
       }
     }
     if (screen === "d-current") {
@@ -1790,7 +2038,7 @@
           return;
         }
         if (S.passenger && S.passenger.active) { picked = S.passenger.active.id; next = "live"; }
-        else draft = { step: 1 };
+        else { draft = freshDraft(); screen = "trip"; render(); prefillPickup(); return; }
       }
       screen = next;
       render();
@@ -1834,40 +2082,72 @@
         toast("Сначала заполните профиль");
         return;
       }
-      draft = { step: 1 };
+      draft = freshDraft();
+      window._tripFocused = false;
       go("trip");
+      prefillPickup();
     },
-    "pickup-next": function () {
-      var pickup = val("pickup");
-      if (pickup.length < 3) { toast("Укажите адрес"); return; }
-      draft.pickup = pickup;
-      draft.entrance = val("entrance");
-      draft.step = 2;
+    // --- одноэкранный заказ ---
+    "of-edit-pickup": function () {
+      if (!draft) return;
+      window._editPickup = true;
+      draft.pickup = "";
+      draft.pickup_coords = null;
+      draft.price = 0;
+      draft._quoteKey = "";
       render();
     },
-    "dest-next": function () {
-      var dest = val("dest");
-      if (dest.length < 3) { toast("Укажите, куда ехать"); return; }
-      if (draft.pending) return;
-      draft.destination = dest;
-      draft.step = 3;
-      draft.pending = true;
-      var entrance = draft.entrance || "";
-      var favIndex = draft.favoriteIndex;
+    "of-edit-dest": function () {
+      if (!draft) return;
+      draft.destination = "";
+      draft.dest_coords = null;
+      draft.price = 0;
+      draft._quoteKey = "";
       render();
-      api("/api/act", {
-        op: "quote",
-        pickup: draft.pickup,
-        destination: dest,
-        stop: draft.stop || "",
-        pickup_coords: draft.pickup_coords || null,
-        dest_coords: draft.dest_coords || draft.destination_coords || null
-      }).then(function (data) {
-        draft = data.draft; draft.step = 3; draft.pending = false;
-        draft.entrance = entrance;
-        if (favIndex != null) draft.favoriteIndex = favIndex;
-        render();
-      }).catch(function (e) { draft.step = 2; draft.pending = false; toast(e.message); render(); });
+      var input = document.getElementById("dest");
+      if (input) input.focus();
+    },
+    "of-add-stop": function () {
+      if (!draft) return;
+      draft.stops = draft.stops || [];
+      if (draft.stops.length >= 3) return;
+      draft.stops.push("");
+      render();
+    },
+    "of-del-stop": function (el) {
+      if (!draft || !draft.stops) return;
+      draft.stops.splice(Number(el.dataset.i), 1);
+      quoteDraft();
+    },
+    "of-entrance": function () {
+      sheet("<h2>Подъезд</h2><p class=\"muted\">Чтобы водитель сразу подошёл к нужному входу.</p>" +
+        field("entr", "Номер подъезда", (draft && draft.entrance) || "", "например 3") +
+        '<button class="btn" data-act="of-entrance-save">Сохранить</button>');
+    },
+    "of-entrance-save": function () {
+      var v = val("entr");
+      if (draft) draft.entrance = v;
+      closeSheet();
+      render();
+    },
+    "of-reset": function () {
+      draft = freshDraft();
+      window._tripFocused = false;
+      render();
+      prefillPickup();
+    },
+    "of-recalc": function () {
+      if (!draft) return;
+      draft._quoteKey = "";
+      quoteDraft(true);
+    },
+    "pickup-next": function () { quoteDraft(); },
+    "dest-next": function () { quoteDraft(); },
+    "edit-route": function () {
+      if (!draft) return;
+      draft.step = 1;
+      draft.pending = false;
+      render();
     },
     "sheet-price": function () {
       var base = (draft && draft.calc_price) ? Number(draft.calc_price) : (draft ? Number(draft.price) || 0 : 0);
@@ -1885,31 +2165,18 @@
       draft.price = n; closeSheet(); render();
     },
     "sheet-stop": function () {
-      sheet("<h2>Остановка</h2>" + field("stop", "Адрес", draft.stop || "", "Город, улица, дом") +
-        geoBtn("stop") + '<button class="btn" data-act="apply-stop">Пересчитать</button>');
-      attachSuggest("stop", function (it) {
-        var input = document.getElementById("stop");
-        if (input) input.value = fullAddress(it);
-      });
+      // Остановки теперь добавляются прямо на экране заказа — старую
+      // модалку оставляем как совместимую точку входа.
+      if (draft) { draft.stops = draft.stops || []; }
+      go("trip");
     },
     "apply-stop": function () {
       var stop = val("stop");
       closeSheet();
-      draft.stop = stop;
-      draft.pending = true;
-      var entrance = draft.entrance || "";
-      var favIndex = draft.favoriteIndex;
-      render();
-      api("/api/act", {
-        op: "quote", pickup: draft.pickup, destination: draft.destination, stop: stop,
-        pickup_coords: draft.pickup_coords || null,
-        dest_coords: draft.dest_coords || draft.destination_coords || null
-      }).then(function (data) {
-        draft = data.draft; draft.step = 3; draft.pending = false;
-        draft.entrance = entrance;
-        if (favIndex != null) draft.favoriteIndex = favIndex;
-        render();
-      }).catch(function (e) { draft.pending = false; toast(e.message); render(); });
+      if (!draft) return;
+      draft.stops = draftStops();
+      if (stop) draft.stops.push(stop);
+      quoteDraft();
     },
     "edit-route": function () {
       if (!draft) return;
@@ -1918,7 +2185,13 @@
       render();
     },
     confirm: async function () {
-      var ok = await run({ op: "order.create", draft: draft, price: draft.price });
+      if (!draft || draft.pending) return;
+      if (!draft.pickup || !draft.destination) { toast("Укажите адреса"); return; }
+      if (!draft.price) { toast("Подождите, считаю стоимость"); return; }
+      draft.stops = draftStops();
+      var body = { op: "order.create", draft: draft, price: draft.price };
+      if (draft.favoriteIndex != null) body.from_favorite = true;
+      var ok = await run(body);
       if (ok && S.passenger.active) { draft = null; picked = S.passenger.active.id; screen = "live"; render(); }
     },
     "open-order": function (el) { picked = Number(el.dataset.id); go("live"); },
@@ -2064,13 +2337,25 @@
           toast("Маршрут не найден");
           return;
         }
-        draft = data.draft;
-        draft.step = 3;
-        draft.pending = false;
+        var fav = data.draft;
+        draft = freshDraft();
+        draft.pickup = fav.pickup || "";
+        draft.destination = fav.destination || "";
+        draft.pickup_coords = fav.pickup_coords || null;
+        draft.dest_coords = fav.destination_coords || null;
+        draft.pickup_city = fav.pickup_city || (S.user.home_city || "");
+        draft.destination_city = fav.destination_city || "";
+        draft.stops = (fav.stops || (fav.waypoints || []).map(function (w) {
+          return typeof w === "string" ? w : (w.text || "");
+        })).filter(Boolean);
+        draft.entrance = fav.entrance || "";
+        draft.price = Number(fav.price) || 0;
+        draft.calc_price = draft.price;
         draft.favoriteIndex = index;
-        draft.calc_price = Number(draft.price) || 0;
+        draft._quoteKey = "";
         screen = "trip";
         render();
+        quoteDraft(true);
       }).catch(function (e) { toast(e.message || "Не удалось открыть маршрут"); });
     },
     "to-rate": function (el) { picked = Number(el.dataset.id); window._star = 0; go("rate"); },
