@@ -1712,10 +1712,13 @@
     } else {
       mainBtn = '<button class="btn" data-act="of-recalc">Рассчитать стоимость</button>';
     }
+    // «По городу» или «Межгород» — видно сразу, как в агрегаторах.
+    var kind = intercity
+      ? '<b class="tag tag-inter">Межгород</b>'
+      : '<b class="tag tag-city">По городу</b>';
     return '<div class="of-sum">' +
-      '<span>' + (d.km != null ? Number(d.km).toFixed(1) + " км" : "") +
-      (d.minutes ? " · ~" + d.minutes + " мин" : "") +
-      (intercity ? ' · <b class="tag">межгород</b>' : "") + "</span>" +
+      '<span>' + kind + (d.km != null ? " · " + Number(d.km).toFixed(1) + " км" : "") +
+      (d.minutes ? " · ~" + d.minutes + " мин" : "") + "</span>" +
       '<b>' + (busy ? "Считаю…" : money(d.price)) + "</b></div>" + mainBtn;
   }
 
@@ -3103,6 +3106,74 @@
     }).catch(function () {});
   }
 
+  // ==================== ЖИВОЕ ОБНОВЛЕНИЕ ЗАКАЗОВ У ВОДИТЕЛЯ ====================
+  // Список заказов у водителя должен обновляться сам: новый заказ появился —
+  // сразу видно, и порядок пересчитан (ближайший первым).
+  // Сравниваем «подпись» списка, чтобы не дёргать перерисовку зря.
+  function driverOrdersSignature(drv) {
+    if (!drv) return "";
+    var parts = [];
+    var list = drv.available || [];
+    for (var i = 0; i < list.length; i++) {
+      var o = list[i] || {};
+      parts.push(o.id + ":" + Math.round(Number(o.price) || 0));
+    }
+    parts.push("cur=" + (((drv.current || {}).id) || "-"));
+    parts.push("next=" + (((drv.next || {}).id) || "-"));
+    parts.push("w=" + (drv.pending_waiting || 0));
+    return parts.join(",");
+  }
+
+  function driverScreenActive() {
+    return !!(S && S.user && S.user.role === "driver" &&
+      (screen === "driver" || screen === "d-orders" || screen === "d-current"));
+  }
+
+  function userIsTyping() {
+    var el = document.activeElement;
+    return !!(el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA"));
+  }
+
+  function applyDriverFeed(feed) {
+    if (!feed || feed.ok === false || !S || !S.driver) return false;
+    var beforeIds = (S.driver.available || []).map(function (o) { return String((o || {}).id); });
+    var before = driverOrdersSignature(S.driver);
+    S.driver.available = feed.available || [];
+    S.driver.available_count = feed.available_count || 0;
+    S.driver.pending_waiting = feed.pending_waiting || 0;
+    S.driver.groups = feed.groups || [];
+    S.driver.reference = feed.reference || {};
+    S.driver.current = feed.current || null;
+    S.driver.next = feed.next || null;
+    if (S.user && feed.line) S.user.line = feed.line;
+    var after = driverOrdersSignature(S.driver);
+    if (before === after) return false;
+    // Новый заказ появился — сообщим звуком и всплывашкой.
+    var fresh = (S.driver.available || []).filter(function (o) {
+      return beforeIds.indexOf(String((o || {}).id)) < 0;
+    });
+    if (fresh.length) {
+      try { taxiBeep(); } catch (e) {}
+      toast(fresh.length === 1
+        ? "Новый заказ · " + Math.round(Number(fresh[0].price) || 0) + " ₽"
+        : "Новых заказов: " + fresh.length);
+    }
+    if (!userIsTyping() && driverScreenActive()) render();
+    return true;
+  }
+
+  function pollDriverFeed() {
+    if (!S || !S.user || S.user.role !== "driver") return;
+    if (!driverScreenActive()) return;
+    if (inflight) return;
+    var uid = (S.user && S.user.id) || (maxUser && maxUser.id) || savedUid() || savedUidCookie();
+    if (!uid) return;
+    api("/api/act", { op: "driver.feed", uid: uid }).then(function (data) {
+      if (inflight) return;
+      applyDriverFeed(data);
+    }).catch(function () {});
+  }
+
   // Опрос состояния — уведомления без перерисовки, чтобы не стирать ввод
   setInterval(function () {
     if (!S || inflight) return;
@@ -3119,8 +3190,16 @@
       // второй всё равно отработает (иначе уведомления терялись).
       try { checkStatusChanges(data); } catch (e) {}
       try { checkIncomingChat(S); } catch (e) {}
+      // У водителя список заказов обновляется сам.
+      try { pollDriverFeed(); } catch (e) {}
     }).catch(function () {});
   }, 5000);
+
+  // Живой фид заказов для водителя: каждые 3 секунды, пока открыт
+  // главный экран, «Заказы» или «Рейс». Отдельно от /api/state — он лёгкий.
+  setInterval(function () {
+    try { pollDriverFeed(); } catch (e) {}
+  }, 3000);
 
   // Отдельный частый опрос чата: всплывающие окна о новых сообщениях.
   setInterval(function () {

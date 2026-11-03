@@ -475,6 +475,44 @@ def driver_block(uid: int) -> dict:
     }
 
 
+def driver_feed(uid: int) -> dict:
+    """Лёгкий фид для водителя: только список заказов и текущий рейс.
+
+    Нужен для живого обновления: опрос раз в 3 секунды должен быть дешёвым,
+    поэтому здесь нет истории, статистики и графиков (они в /api/state).
+    Сортировка — от ближайшего к дальнему от опорной точки водителя
+    (конечная точка текущей поездки -> точка Б последней заявки).
+    """
+    ref = S.get_driver_reference_point(uid) or {}
+    ref_lat, ref_lon = ref.get("lat"), ref.get("lon")
+    raw = get_available_orders_for_driver(uid, ref_lat, ref_lon) or []
+    available = []
+    for item in raw:
+        oid = item.get("id") if isinstance(item, dict) else item
+        order = item if isinstance(item, dict) and item.get("pickup") else S.get_order(oid)
+        if order:
+            available.append(brief_order(order))
+    active = S.get_driver_active_orders(uid)
+    pending_waiting = 0
+    try:
+        for o in S.orders.values():
+            if o.get("status") == "pending" and not o.get("driver_id"):
+                pending_waiting += 1
+    except Exception:
+        pending_waiting = 0
+    return {
+        "ok": True,
+        "available": available,
+        "available_count": len(available),
+        "pending_waiting": pending_waiting,
+        "groups": group_orders_by_area(available, ref_lat, ref_lon),
+        "reference": ref,
+        "current": brief_order(active[0]) if active else None,
+        "next": brief_order(active[1]) if len(active) > 1 else None,
+        "line": (S.get_user(uid) or {}).get("status") or "",
+    }
+
+
 def admin_block() -> dict:
     from core.tariff_manager import _default_intercity_tariff, _default_tariff
     drivers = S.get_all_drivers()
@@ -678,19 +716,32 @@ def quote(pickup: str, dest: str, stop: str = "",
             (pc, gcity1), (dc, gcity2) = await asyncio.gather(
                 geo_checked(pickup, city1),
                 geo_checked(dest, city2 or city1))
-            city1 = city1 or gcity1
-            city2 = city2 or gcity2
+            # ВАЖНО: город из геокодера главнее подсказки. Иначе адрес
+            # «Торосова 15, Абакан» при родном городе Черногорск считался
+            # городским, и межгород (40 ₽/км) не применялся.
+            city1 = gcity1 or city1
+            city2 = gcity2 or city2
         elif pc is None:
             pc, gcity1 = await geo_checked(pickup, city1)
-            city1 = city1 or gcity1
+            city1 = gcity1 or city1
         elif dc is None:
             dc, gcity2 = await geo_checked(dest, city2 or city1)
-            city2 = city2 or gcity2
+            city2 = gcity2 or city2
         if not pc:
             raise ValueError(f"Не нашли адрес подачи «{pickup}». Уточните улицу и дом.")
         if not dc:
             dc, gcity2 = await geo_checked(dest, city1 or city2)
-            city2 = city2 or gcity2
+            city2 = gcity2 or city2
+        # Назначение без города ищем в городе ПОДАЧИ (а не в родном городе
+        # пассажира): если он уже в Абакане, «Ленина 20» — это Абакан.
+        if (dc and city1 and city2
+                and normalize_city(city1) != normalize_city(city2)
+                and not _city_mentioned(dest, city2)
+                and not _city_mentioned(dest, city1)
+                and not _has_explicit_other_city(dest, city2)):
+            alt, alt_city = await geo_checked(dest, city1)
+            if alt:
+                dc, city2 = alt, (alt_city or city1)
         if pc and not city1 and dc and not city2:
             city1, city2 = await asyncio.gather(
                 _city_by_coords(pc["lat"], pc["lon"]),
@@ -1707,6 +1758,10 @@ def act(uid: int, body: dict) -> dict:
             raise ValueError("Нет активной смены")
         S.set_online_status(uid, status)
         return {"ok": True}
+    if op == "driver.feed":
+        # Живое обновление списка заказов у водителя (лёгкий ответ).
+        must_role(uid, "driver")
+        return driver_feed(uid)
     if op == "driver.geo":
         must_role(uid, "driver")
         lat, lon = float(body["lat"]), float(body["lon"])
