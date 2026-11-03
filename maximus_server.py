@@ -164,29 +164,56 @@ def uid_from(handler, body: dict | None = None) -> int:
     return 0
 
 
+def _order_total(o: dict) -> float:
+    """Итог, который пассажир платит за заказ.
+
+    final_price в complete() уже включает платное ожидание, поэтому
+    waiting_cost повторно не прибавляем. Для старых заказов без
+    final_price собираем price + waiting.
+    """
+    try:
+        final = float(o.get("final_price") or 0)
+    except (TypeError, ValueError):
+        final = 0.0
+    if final:
+        return final
+    base = 0.0
+    try:
+        base = float(o.get("price") or 0)
+    except (TypeError, ValueError):
+        base = 0.0
+    try:
+        wait = float(o.get("waiting_cost") or 0)
+    except (TypeError, ValueError):
+        wait = 0.0
+    return base + wait
+
+
 def brief_order(o: dict) -> dict:
     if not o:
         return {}
     passenger = S.get_user(o.get("passenger_id")) or {}
     driver = S.get_user(o.get("driver_id")) or {} if o.get("driver_id") else {}
     try:
-        final_price = float(o.get("final_price") or o.get("price") or 0)
+        final_price = float(o.get("final_price") or 0)
     except (TypeError, ValueError):
         final_price = 0.0
     try:
         waiting_cost = float(o.get("waiting_cost") or 0)
     except (TypeError, ValueError):
         waiting_cost = 0.0
+    # Итог с пассажира. final_price уже включает ожидание.
+    total_paid = final_price or (float(o.get("price") or 0) + waiting_cost)
     commission = S.get_commission_config()
     commission_on = bool(commission.get("enabled")) and commission.get("mode") == "percent"
     percent = float(commission.get("percent") or 0) if commission_on else 0.0
     earning = o.get("driver_earning")
     if earning is None or earning == "":
-        earning = final_price * (100 - percent) / 100.0 if commission_on else final_price
+        earning = total_paid * (100 - percent) / 100.0 if commission_on else total_paid
     try:
         earning = float(earning)
     except (TypeError, ValueError):
-        earning = final_price
+        earning = total_paid
     return {
         "id": o.get("id"),
         "passenger_id": o.get("passenger_id"),
@@ -198,9 +225,15 @@ def brief_order(o: dict) -> dict:
         "price": o.get("final_price") or o.get("price") or 0,
         "base_price": o.get("base_price") or o.get("price") or 0,
         "final_price": o.get("final_price") or o.get("price") or 0,
-        "total_price": round(final_price + waiting_cost, 2),
+        # Итог с пассажира: final_price УЖЕ включает ожидание (см. complete()),
+        # поэтому повторно waiting_cost не прибавляем.
+        "total_price": round(
+            float(o.get("final_price") or 0)
+            or (float(o.get("price") or 0) + waiting_cost), 2),
         "commission_percent": percent,
-        "commission_amount": round((final_price + waiting_cost) - earning, 2),
+        "commission_amount": round(
+            (float(o.get("final_price") or 0)
+             or (float(o.get("price") or 0) + waiting_cost)) - earning, 2),
         "driver_earning": round(earning, 2),
         "distance": o.get("distance") or 0,
         "time_minutes": o.get("time_minutes") or 0,
@@ -1725,19 +1758,42 @@ def act(uid: int, body: dict) -> dict:
         earning_total = 0.0
         count = len(orders)
         for o in orders:
-            try:
-                total += float(o.get("final_price") or o.get("price") or 0) + float(o.get("waiting_cost") or 0)
-            except (TypeError, ValueError):
-                pass
+            paid = _order_total(o)
+            total += paid
             earned = o.get("driver_earning")
             if earned in (None, ""):
-                earned = float(o.get("final_price") or o.get("price") or 0) + float(o.get("waiting_cost") or 0)
+                earned = paid
             try:
                 earning_total += float(earned)
             except (TypeError, ValueError):
                 pass
         return {"ok": True, "date": date, "sum": round(total, 2),
                 "earning": round(earning_total, 2), "count": count,
+                "orders": [brief_order(o) for o in orders]}
+    if op == "driver.period":
+        # Все завершённые заявки за период (день/неделя/месяц) — для кнопки
+        # «Заявки за период» под графиком заработка.
+        must_role(uid, "driver")
+        period = (body.get("period") or "week").strip()
+        if period not in ("day", "week", "month"):
+            raise ValueError("Неизвестный период")
+        days = {"day": 1, "week": 7, "month": 30}[period]
+        orders = S.get_driver_history(uid, 1000, period=f"days:{days}")
+        total = 0.0
+        earning_total = 0.0
+        for o in orders:
+            paid = _order_total(o)
+            total += paid
+            earned = o.get("driver_earning")
+            if earned in (None, ""):
+                earned = paid
+            try:
+                earning_total += float(earned)
+            except (TypeError, ValueError):
+                pass
+        return {"ok": True, "period": period, "days": days,
+                "sum": round(total, 2), "earning": round(earning_total, 2),
+                "count": len(orders),
                 "orders": [brief_order(o) for o in orders]}
     if op == "driver.cancel":
         order = own_current_order(uid, int(body["id"]))

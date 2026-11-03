@@ -1680,9 +1680,16 @@ class Storage:
             if key not in buckets:
                 continue
             try:
-                amount = float(o.get("price", 0) or 0) + float(o.get("waiting_cost", 0) or 0)
+                # final_price уже включает ожидание — не суммируем повторно.
+                final = float(o.get("final_price") or 0)
             except (TypeError, ValueError):
-                amount = 0.0
+                final = 0.0
+            if not final:
+                try:
+                    final = float(o.get("price", 0) or 0) + float(o.get("waiting_cost", 0) or 0)
+                except (TypeError, ValueError):
+                    final = 0.0
+            amount = final
             buckets[key]["sum"] = round(buckets[key]["sum"] + amount, 2)
             earning = o.get("driver_earning")
             if earning in (None, ""):

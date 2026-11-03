@@ -915,6 +915,17 @@ select:focus {
   box-shadow: var(--shadow-sm);
 }
 
+/* Кликабельная карточка статистики (например «Заявок» под графиком). */
+button.stat {
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+
+button.stat:active { filter: brightness(0.96); }
+
 .stat b {
   display: block;
   font-family: Unbounded, Manrope, sans-serif;

@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
   var S = null;
   var screen = "home";
   var stack = [];
@@ -942,30 +942,16 @@
             '<div class="stat-grid chart-total">' +
               '<div class="stat"><span class="muted">За ' +
                 labels[periodKey].toLowerCase() + '</span><b>' + money(totalSum) + "</b></div>" +
-              '<div class="stat"><span class="muted">Заявок</span><b>' + totalCount + "</b></div></div>" +
-            '<p class="muted" style="text-align:center">Нажмите на столбик — покажутся все заявки за этот день</p>'
+              // Клик по «Заявок» — все заявки за выбранный период.
+              '<button class="stat" data-act="d-period-orders" data-p="' + periodKey + '">' +
+                '<span class="muted">Заявок</span><b>' + totalCount + "</b></button></div>" +
+            '<p class="muted" style="text-align:center">Нажмите на столбик — итог и все заявки этого дня</p>'
           : '<div class="stat-grid"><div class="stat"><span class="muted">Сумма</span><b>' + money(totalSum) +
             "</b></div><div class=\"stat\"><span class=\"muted\">Заявок</span><b>" + totalCount +
             "</b></div></div><p class='list-empty'>Пока нет завершённых заявок</p>");
     },
-    "d-day-open": function (el) {
-      var day = el.dataset.date || "";
-      window._statDay = day;
-      window._statDayOrders = null;
-      go("d-day-summary");
-      api("/api/act", { op: "driver.day", date: day }).then(function (data) {
-        if (screen !== "d-day-summary" || window._statDay !== day) return;
-        window._statDayOrders = (data && data.orders) || [];
-        render();
-      }).catch(function (e) {
-        if (screen !== "d-day-summary" || window._statDay !== day) return;
-        window._statDayOrders = [];
-        toast(e.message || "Не удалось загрузить заявки дня");
-        render();
-      });
-    },
     "d-day-summary": function () {
-      // Сначала итог дня: сколько заработал и сколько заявок сделал.
+      // Клик по столбику: сразу итог дня (заработал / заявок) И список заявок.
       var day = window._statDay || "";
       var list = window._statDayOrders;
       var loading = !Array.isArray(list);
@@ -974,58 +960,64 @@
           '<button class="btn ghost" data-act="tab" data-screen="d-today">Назад к графику</button>';
       }
       var totals = dayTotals(list);
+      function card(o) {
+        var stops = (o.waypoints || []).map(function (w) {
+          return typeof w === "string" ? w : (w.text || w.address || "");
+        }).filter(Boolean);
+        return '<button class="order" data-act="d-today-open" data-id="' + o.id + '">' +
+          '<div class="row">' + badge(o.status) + "<b>" + money(orderEarning(o)) + "</b></div>" +
+          '<div class="route" style="margin-top:8px">' + esc(o.pickup) +
+          (stops.length ? stops.map(function (s) { return "<small>⏸ " + esc(s) + "</small>"; }).join("") : "") +
+          "<small>" + esc(o.destination) + "</small></div>" +
+          '<div class="muted" style="margin-top:6px">#' + o.id + " · " +
+          (o.completed_at ? esc(fmtDateTime(o.completed_at)) : "—") + "</div></button>";
+      }
       return "<h2>" + esc(day) + "</h2>" +
         '<div class="stat-grid"><div class="stat"><span class="muted">Заработал</span><b>' +
         money(totals.earning) + '</b></div><div class="stat"><span class="muted">Заявок</span><b>' +
         totals.count + "</b></div></div>" +
         (totals.waiting > 0 ? '<div class="card"><div class="row"><span class="muted">В том числе ожидание</span><b>' +
           money(totals.waiting) + "</b></div></div>" : "") +
-        '<button class="btn" data-act="d-day-orders-open">Заказы за день' +
-        (totals.count ? " · " + totals.count : "") + "</button>" +
+        '<p class="section-label">Заявки за день</p>' +
+        (list.length ? list.map(card).join("")
+          : '<p class="list-empty">За этот день заявок нет</p>') +
         '<button class="btn ghost" data-act="tab" data-screen="d-today">Назад к графику</button>';
     },
-    "d-day-orders-open": function () {
-      go("d-day-orders");
-    },
-    "d-day-orders": function () {
-      var day = window._statDay || "";
-      var list = window._statDayOrders;
-      var loading = !Array.isArray(list);
-      if (loading) {
-        // Подстраховка: если запрос ещё не вернулся, показываем то,
-        // что уже есть в истории.
-        var all = (S.driver && S.driver.history) || [];
-        list = all.filter(function (o) {
-          var ts = o.completed_at || o.created_at || "";
-          return ts.slice(0, 10) === day;
-        });
+    "d-period-list": function () {
+      // Все заявки за выбранный период (день/неделя/месяц).
+      var p = window._periodKey || "week";
+      var data = window._periodData;
+      var labels = { day: "Сегодня", week: "За неделю", month: "За месяц" };
+      if (!data) {
+        return "<h2>" + labels[p] + "</h2><p class='list-empty'>Загружаем заявки…</p>" +
+          '<button class="btn ghost" data-act="tab" data-screen="d-today">Назад к графику</button>';
       }
-      var totals = dayTotals(list);
-      var body = list.length
-        ? list.map(function (o) {
-            var stops = (o.waypoints || []).map(function (w) {
-              return typeof w === "string" ? w : (w.text || w.address || "");
-            }).filter(Boolean);
-            return '<button class="order" data-act="d-today-open" data-id="' + o.id + '">' +
-              '<div class="row">' + badge(o.status) + "<b>" + money(orderEarning(o)) + "</b></div>" +
-              '<div class="route" style="margin-top:8px">' + esc(o.pickup) +
-              (stops.length ? stops.map(function (s) { return "<small>⏸ " + esc(s) + "</small>"; }).join("") : "") +
-              "<small>" + esc(o.destination) + "</small></div>" +
-              '<div class="muted" style="margin-top:6px">#' + o.id + " · " +
-              (o.completed_at ? esc(fmtDateTime(o.completed_at)) : "—") + "</div></button>";
-          }).join("")
-        : (loading
-          ? '<p class="list-empty">Загружаем заявки дня…</p>'
-          : '<p class="list-empty">За этот день заявок нет</p>');
-      return "<h2>" + esc(day || "Заявки") + "</h2>" +
+      var list = data.orders || [];
+      function card(o) {
+        var stops = (o.waypoints || []).map(function (w) {
+          return typeof w === "string" ? w : (w.text || w.address || "");
+        }).filter(Boolean);
+        return '<button class="order" data-act="d-today-open" data-id="' + o.id + '">' +
+          '<div class="row">' + badge(o.status) + "<b>" + money(orderEarning(o)) + "</b></div>" +
+          '<div class="route" style="margin-top:8px">' + esc(o.pickup) +
+          (stops.length ? stops.map(function (s) { return "<small>⏸ " + esc(s) + "</small>"; }).join("") : "") +
+          "<small>" + esc(o.destination) + "</small></div>" +
+          '<div class="muted" style="margin-top:6px">#' + o.id + " · " +
+          (o.completed_at ? esc(fmtDateTime(o.completed_at)) : "—") + "</div></button>";
+      }
+      return "<h2>" + labels[p] + "</h2>" +
         '<div class="stat-grid"><div class="stat"><span class="muted">Заработал</span><b>' +
-        money(totals.earning) + '</b></div><div class="stat"><span class="muted">Заявок</span><b>' +
-        totals.count + "</b></div></div>" +
-        body +
+        money(data.earning || 0) + '</b></div><div class="stat"><span class="muted">Заявок</span><b>' +
+        (data.count || 0) + "</b></div></div>" +
+        '<p class="section-label">Заявки</p>' +
+        (list.length ? list.map(card).join("")
+          : '<p class="list-empty">За этот период заявок нет</p>') +
         '<button class="btn ghost" data-act="tab" data-screen="d-today">Назад к графику</button>';
     },
     "d-today-detail": function () {
       var pool = [].concat(window._statDayOrders || []);
+      var pd = window._periodData;
+      if (pd && pd.orders) pool = pool.concat(pd.orders);
       var o = orderById(picked) || pool.filter(function (x) { return x.id === picked; })[0] ||
         ((S.driver.today_orders || []).filter(function (x) { return x.id === picked; })[0]);
       if (!o) return "<h2>Заявка</h2><p class=\"list-empty\">Не найдена</p>" +
@@ -1059,7 +1051,7 @@
         '<div class="row"><span class="muted">Заработок</span><b>' + money(orderEarning(o)) + "</b></div></div>" +
         // Телефон пассажира водителю не показываем — только «Написать».
         '<button class="btn" data-act="sheet-chat" data-id="' + o.id + '">Написать пассажиру</button>' +
-        '<button class="btn ghost" data-act="tab" data-screen="d-day-orders">К списку</button>';
+        '<button class="btn ghost" data-act="tab" data-screen="d-day-summary">К списку</button>';
     },
     "d-orders": function () {
       var list = (S.driver && S.driver.available) || [];
@@ -2014,6 +2006,44 @@
     "d-period": function (el) {
       window._statPeriod = el.dataset.p || "week";
       render();
+    },
+    // Клик по столбику графика: показываем итог дня (заработал / заявок),
+    // затем кнопкой — список заявок и детали.
+    "d-day-open": function (el) {
+      var day = el.dataset.date || "";
+      window._statDay = day;
+      window._statDayOrders = null;
+      go("d-day-summary");
+      api("/api/act", { op: "driver.day", date: day }).then(function (data) {
+        if (screen !== "d-day-summary" || window._statDay !== day) return;
+        window._statDayOrders = (data && data.orders) || [];
+        render();
+      }).catch(function (e) {
+        if (screen !== "d-day-summary" || window._statDay !== day) return;
+        window._statDayOrders = [];
+        toast(e.message || "Не удалось загрузить заявки дня");
+        render();
+      });
+    },
+    "d-day-orders-open": function () {
+      go("d-day-summary");
+    },
+    // Клик по «Заявок» под графиком: все заявки за выбранный период.
+    "d-period-orders": function (el) {
+      var p = el.dataset.p || window._statPeriod || "week";
+      window._periodKey = p;
+      window._periodData = null;
+      go("d-period-list");
+      api("/api/act", { op: "driver.period", period: p }).then(function (data) {
+        if (screen !== "d-period-list" || window._periodKey !== p) return;
+        window._periodData = data || { orders: [], count: 0, earning: 0 };
+        render();
+      }).catch(function (e) {
+        if (screen !== "d-period-list" || window._periodKey !== p) return;
+        window._periodData = { orders: [], count: 0, earning: 0 };
+        toast(e.message || "Не удалось загрузить заявки периода");
+        render();
+      });
     },
     "d-orders-mode": function (el) {
       window._ordersMode = el.dataset.p || "all";
