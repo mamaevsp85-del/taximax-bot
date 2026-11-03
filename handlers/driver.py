@@ -1050,9 +1050,13 @@ async def driver_orders_available(client, user_id, update, ctx):
             "❌ Доступ неактивен. Пополнение доступно только админу и менеджеру.",
             keyboard=back_to_main_rows())
         return
+    # Сколько заказов прямо сейчас ищут водителя (по всей базе) —
+    # показываем в пункте «Список заказов» и в ветке «нет заказов».
+    waiting_count = len(S.get_pending_orders())
     if S.get_user(user_id).get("status") != "online":
-        await _Reply(client, user_id).send("⚠️ Сначала выйдите на линию.",
-                                           keyboard=work_status_rows())
+        await _Reply(client, user_id).send(
+            f"⚠️ Сначала выйдите на линию.\n\n🚕 Ждут водителя сейчас: {waiting_count}",
+            keyboard=work_status_rows())
         return
     if is_driver_busy(user_id):
         await _Reply(client, user_id).send(
@@ -1062,10 +1066,11 @@ async def driver_orders_available(client, user_id, update, ctx):
     if not pending:
         await _send_menu(client, user_id,
                          "📋 На данный момент нет доступных заказов.\n\n"
+                         f"🚕 Ждут водителя сейчас: {waiting_count}\n\n"
                          "Вернитесь в меню и подождите.",
                          back_to_main_rows(), replace_previous=1)
         return
-    rows = ["📋 <b>Список заказов:</b>\n"]
+    rows = [f"📋 <b>Список заказов:</b>\n\n🚕 Ждут водителя сейчас: {waiting_count}\n"]
     kb: List[List[Dict[str, Any]]] = []
     for o in pending[:10]:
         oid = o.get("id", 0)

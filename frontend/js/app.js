@@ -786,31 +786,115 @@
         '<span class="badge ' + (u.line === "online" ? "ok" : "off") + '">' + line + "</span></div>" +
         '<div class="seg" style="margin-top:12px">' +
         seg("online", "На линии") + seg("break", "Перерыв") + seg("offline", "Оффлайн") + "</div></div>" +
-        '<div class="stat-grid" style="margin-top:12px">' +
-        '<div class="stat"><span class="muted">Сегодня</span><b>' + money(todayEarn) + '</b></div>' +
-        '<button class="stat" data-act="tab" data-screen="d-today" style="text-align:left;cursor:pointer;border:0;background:inherit;font:inherit;color:inherit">' +
-        '<span class="muted">Заявок</span><b>' + todayCount + '</b></button></div>' +
+        // Одна длинная кнопка «Сегодня»: и заработок, и количество заявок.
+        // (Раньше было две отдельные колонки — убрали по просьбе.)
+        '<button class="today-row" data-act="tab" data-screen="d-today">' +
+        '<span class="today-left"><span class="muted">Сегодня</span>' +
+        '<b class="today-sum">' + money(todayEarn) + "</b></span>" +
+        '<span class="today-right"><span class="muted">Заявок</span>' +
+        '<b class="today-count">' + todayCount + "</b></span>" +
+        "</button>" +
         (S.driver.current ? orderCard(S.driver.current, "d-open") : "") +
         group("На линии") +
         '<div class="grid">' +
         tile("d-orders", "☰", "Список заказов", "свободные рядом") +
         tile("d-current", "▶", "Текущий рейс", S.driver.current ? "заказ #" + S.driver.current.id : "нет рейса") +
-        tile("d-today", "💵", "Сегодня", todayCount + " заявок · " + money(todayEarn)) +
         tile("d-profile", "☺", "Профиль", "авто и документы") +
         "</div>";
     },
     "d-today": function () {
-      var today = (S.driver && S.driver.today) || {};
-      var list = (S.driver && S.driver.today_orders) || [];
-      return "<h2>Сегодня</h2>" +
-        '<div class="stat-grid"><div class="stat"><span class="muted">Заработано</span><b>' + money(today.earnings || 0) +
-        '</b></div><div class="stat"><span class="muted">Заявок</span><b>' + (today.count || 0) + "</b></div></div>" +
+      var daily = (S.driver && S.driver.daily) || {};
+      var periodKey = window._statPeriod || "week";
+      var list = daily[periodKey] || [];
+      var totalSum = 0, totalCount = 0;
+      for (var i = 0; i < list.length; i++) {
+        totalSum += Number(list[i].sum || 0);
+        totalCount += Number(list[i].count || 0);
+      }
+      var labels = { day: "День", week: "Неделя", month: "Месяц" };
+      var tabs = ["day", "week", "month"].map(function (k) {
+        return '<button class="' + (periodKey === k ? "on" : "") +
+          '" data-act="d-period" data-p="' + k + '">' + labels[k] + "</button>";
+      }).join("");
+      var maxSum = 0;
+      for (var m = 0; m < list.length; m++) {
+        maxSum = Math.max(maxSum, Number(list[m].sum || 0));
+      }
+      function dayNum(iso) {
+        var parts = String(iso || "").split("-");
+        return parts.length === 3 ? parts[2] : "";
+      }
+      var bars = list.map(function (b) {
+        var sum = Number(b.sum || 0);
+        var h = maxSum > 0 ? Math.max(4, Math.round((sum / maxSum) * 100)) : 4;
+        return '<button class="bar-col" data-act="d-day-open" data-date="' + esc(b.date) + '">' +
+          '<span class="bar-sum">' + (sum ? Math.round(sum) : "") + "</span>" +
+          '<i class="bar" style="height:' + h + '%"></i>' +
+          '<span class="bar-count">' + (b.count || 0) + "</span>" +
+          '<span class="bar-day">' + esc(dayNum(b.date)) + "</span></button>";
+      }).join("");
+      return "<h2>Заработок</h2>" +
+        '<div class="periods">' + tabs + "</div>" +
+        (list.length
+          ? '<div class="bar-chart">' + bars + "</div>" +
+            '<div class="stat-grid chart-total">' +
+              '<div class="stat"><span class="muted">За ' +
+                labels[periodKey].toLowerCase() + '</span><b>' + money(totalSum) + "</b></div>" +
+              '<div class="stat"><span class="muted">Заявок</span><b>' + totalCount + "</b></div></div>" +
+            '<p class="muted" style="text-align:center">Нажмите на столбик — покажутся все заявки за этот день</p>'
+          : '<div class="stat-grid"><div class="stat"><span class="muted">Сумма</span><b>' + money(totalSum) +
+            "</b></div><div class=\"stat\"><span class=\"muted\">Заявок</span><b>" + totalCount +
+            "</b></div></div><p class='list-empty'>Пока нет завершённых заявок</p>");
+    },
+    "d-day-open": function (el) {
+      var day = el.dataset.date || "";
+      window._statDay = day;
+      window._statDayOrders = null;
+      go("d-day-orders");
+      api("/api/act", { op: "driver.day", date: day }).then(function (data) {
+        if (screen !== "d-day-orders" || window._statDay !== day) return;
+        window._statDayOrders = (data && data.orders) || [];
+        render();
+      }).catch(function (e) {
+        if (screen !== "d-day-orders" || window._statDay !== day) return;
+        window._statDayOrders = [];
+        toast(e.message || "Не удалось загрузить заявки дня");
+        render();
+      });
+    },
+    "d-day-orders": function () {
+      var day = window._statDay || "";
+      var list = window._statDayOrders;
+      var loading = !Array.isArray(list);
+      if (loading) {
+        // Подстраховка: если запрос ещё не вернулся, показываем то,
+        // что уже есть в истории.
+        var all = (S.driver && S.driver.history) || [];
+        list = all.filter(function (o) {
+          var ts = o.completed_at || o.created_at || "";
+          return ts.slice(0, 10) === day;
+        });
+        if (!list.length) {
+          return "<h2>" + (day || "Заявки") + "</h2>" +
+            '<p class="list-empty">Загружаем заявки дня…</p>';
+        }
+      }
+      var sum = list.reduce(function (acc, o) {
+        return acc + Number(o.final_price || o.price || 0);
+      }, 0);
+      return "<h2>" + (day || "Заявки") + "</h2>" +
+        '<div class="stat-grid"><div class="stat"><span class="muted">Заработано</span><b>' +
+        money(sum) + '</b></div><div class="stat"><span class="muted">Заявок</span><b>' +
+        list.length + "</b></div></div>" +
         (list.length ? list.map(function (o) {
           return orderCard(o, "d-today-open");
-        }).join("") : '<p class="list-empty">Завершённых заявок за сегодня нет</p>');
+        }).join("") : '<p class="list-empty">За этот день заявок нет</p>') +
+        '<button class="btn ghost" data-act="tab" data-screen="d-today">Назад к графику</button>';
     },
     "d-today-detail": function () {
-      var o = orderById(picked) || ((S.driver.today_orders || []).filter(function (x) { return x.id === picked; })[0]);
+      var pool = [].concat(window._statDayOrders || []);
+      var o = orderById(picked) || pool.filter(function (x) { return x.id === picked; })[0] ||
+        ((S.driver.today_orders || []).filter(function (x) { return x.id === picked; })[0]);
       if (!o) return "<h2>Заявка</h2><p class=\"list-empty\">Не найдена</p>" +
         '<button class="btn ghost" data-act="tab" data-screen="d-today">Назад</button>';
       var stops = (o.waypoints || []).map(function (w) {
@@ -823,37 +907,51 @@
         '<div class="row" style="margin-top:12px"><span class="muted">Расстояние</span><b>' + Number(o.distance || 0).toFixed(1) + " км</b></div>" +
         '<div class="row"><span class="muted">Время</span><b>' + (o.time_minutes || 0) + " мин</b></div>" +
         '<div class="row"><span class="muted">Стоимость</span><b>' + money(o.final_price || o.price) + "</b></div>" +
+        (Number(o.waiting_cost || 0) > 0 ? '<div class="row"><span class="muted">Ожидание</span><b>' + money(o.waiting_cost) + "</b></div>" : "") +
         (o.completed_at ? '<div class="row"><span class="muted">Завершена</span><b>' + esc(fmtDateTime(o.completed_at)) + "</b></div>" : "") +
         "</div>" +
         '<button class="btn ghost" data-act="tab" data-screen="d-today">К списку</button>';
     },
     "d-orders": function () {
-      if (S.user.line !== "online") return "<h2>Список заказов</h2><p class=\"list-empty\">Сначала выйдите на линию</p>";
-      var list = S.driver.available || [];
-      return "<h2>Список заказов</h2>" + (list.length ? list.map(function (o) {
-        return '<div class="card">' + orderCard(o, "noop") + '<button class="btn" data-act="accept" data-id="' + o.id + '">Принять</button></div>';
-      }).join("") : '<p class="list-empty">Свободных заказов нет</p>');
+      var list = (S.driver && S.driver.available) || [];
+      var waiting = Number(S.driver.pending_waiting || 0);
+      var head = '<div class="card"><b>Ждут водителя сейчас: ' + waiting + "</b>" +
+        '<p class="muted">' + (waiting
+          ? "Эти заказы ищут водителя. Ваших доступных: " + list.length
+          : "Новых заказов нет — как только появятся, они будут здесь") +
+        "</p></div>";
+      if (S.user.line !== "online") {
+        return "<h2>Список заказов</h2>" + head +
+          '<p class="list-empty">Сначала выйдите на линию, чтобы видеть заказы и принимать их</p>';
+      }
+      return "<h2>Список заказов</h2>" + head +
+        (list.length ? list.map(function (o) {
+          return '<div class="card">' + orderCard(o, "noop") + '<button class="btn" data-act="accept" data-id="' + o.id + '">Принять</button></div>';
+        }).join("") : '<p class="list-empty">Свободных заказов нет</p>');
     },
     "d-current": function () {
       var o = S.driver.current;
       if (!o) return "<h2>Текущие заказы</h2><p class=\"list-empty\">Нет активного рейса</p>";
       var actions = "";
       if (o.status === "accepted") actions = '<button class="btn" data-act="arrived" data-id="' + o.id + '">Я прибыл</button>';
-      // Прибыл: таймер уже идёт автоматически, кнопка «Ожидание» не нужна.
       if (o.status === "driver_arrived") actions = '<button class="btn" data-act="start-trip" data-id="' + o.id + '">Начать движение</button>';
-      // В ПУТИ: кнопка «Ожидание» — водитель может отметить ожидание
-      // (пассажир просит подождать / остановка по пути).
+      // В ПУТИ: нажали «Ожидание» — кнопки «Завершить поездку» и «Ожидание»
+      // исчезают, появляется «Продолжить поездку». По ней возвращаются
+      // «Ожидание» и «Завершить поездку».
       if (o.status === "in_progress") {
         var wNow = o.waiting || {};
-        var waitLabel = wNow.running ? "⏸ Остановить ожидание" : "⏳ Ожидание";
-        actions = '<button class="btn" data-act="wait" data-id="' + o.id + '">' + waitLabel + '</button>' +
-          '<button class="btn" data-act="complete" data-id="' + o.id + '">Завершить поездку</button>';
+        if (wNow.running) {
+          actions = '<button class="btn" data-act="resume-trip" data-id="' + o.id + '">▶ Продолжить поездку</button>';
+        } else {
+          actions = '<button class="btn" data-act="wait" data-id="' + o.id + '">⏳ Ожидание</button>' +
+            '<button class="btn" data-act="complete" data-id="' + o.id + '">Завершить поездку</button>';
+        }
       }
       var waitBox = (o.status === "driver_arrived" || o.status === "in_progress")
         ? waitingCard(o, "driver") : "";
       if (waitBox) setTimeout(startWaitingTicker, 0);
-      var routeEdit = '<div class="btn-row"><button class="btn ghost" data-act="sheet-live-dest" data-id="' + o.id + '">Изменить адрес</button>' +
-        '<button class="btn ghost" data-act="sheet-live-stop" data-id="' + o.id + '">Добавить остановку</button></div>';
+      // Водитель маршрут не меняет: адрес/остановки правит только пассажир.
+      var routeEdit = "";
       return '<div class="row"><h2 style="margin:0">Рейс #' + o.id + "</h2>" + badge(o.status) + "</div>" +
         waitBox +
         '<div class="card"><div class="route">' + esc(o.pickup) + "<small>" + esc(o.destination) + "</small></div>" +
@@ -1725,6 +1823,10 @@
         if (ok) { toast("Маршрут удалён"); screen = "favorites"; render(); }
       });
     },
+    "d-period": function (el) {
+      window._statPeriod = el.dataset.p || "week";
+      render();
+    },
     "d-today-open": function (el) {
       picked = Number(el.dataset.id);
       go("d-today-detail");
@@ -1759,8 +1861,29 @@
     "fav-save": function () {
       var oid = window._favOrder;
       if (!oid) { screen = "home"; render(); return; }
-      run({ op: "favorite.add", id: oid }).then(function (ok) {
-        if (ok) toast("Маршрут сохранён в избранное");
+      var o = orderById(oid) || {};
+      // Предлагаем дать маршруту понятное название: «На работу», «В школу»…
+      var presets = ["🏠 Домой", "💼 На работу", "🏫 В школу", "🏋️ Тренировка", "🛒 Магазин"];
+      sheet("<h2>Название маршрута</h2>" +
+        '<p class="muted">' + esc(o.pickup || "") + " → " + esc(o.destination || "") + "</p>" +
+        '<div class="chips">' + presets.map(function (p) {
+          return '<button type="button" data-act="fav-name" data-name="' + esc(p) + '">' + esc(p) + "</button>";
+        }).join("") + "</div>" +
+        field("favname", "Название", "", "Например, На работу") +
+        '<button class="btn" data-act="fav-save-do">Сохранить в избранное</button>' +
+        '<button class="btn ghost" data-act="fav-skip">Не сохранять</button>');
+    },
+    "fav-name": function (el) {
+      var input = document.getElementById("favname");
+      if (input) input.value = el.dataset.name || "";
+    },
+    "fav-save-do": function () {
+      var oid = window._favOrder;
+      if (!oid) { closeSheet(); screen = "home"; render(); return; }
+      var label = val("favname");
+      closeSheet();
+      run({ op: "favorite.add", id: oid, label: label }).then(function (ok) {
+        if (ok) toast(label ? "Сохранено: " + label : "Маршрут сохранён в избранное");
         window._favOrder = null;
         screen = "home";
         render();
@@ -1896,18 +2019,29 @@
     },
     "onb-finish": function () {
       var city = val("onb_city");
+      var name = window._onbName || val("onb_name");
+      var phone = window._onbPhone || val("onb_phone");
+      if (!name || name.length < 2) { window._onbStep = 1; render(); toast("Введите имя"); return; }
+      if (String(phone).replace(/\D/g, "").length < 10) {
+        window._onbStep = 2; render(); toast("Введите телефон полностью"); return;
+      }
       run({
         op: "profile",
-        name: window._onbName || val("onb_name"),
-        phone: window._onbPhone || val("onb_phone"),
+        name: name,
+        phone: phone,
         home_city: city
       }).then(function (ok) {
         if (!ok) return;
         window._onbStep = null;
+        window._onbName = null;
+        window._onbPhone = null;
         toast("Профиль сохранён");
         stack = [];
         screen = homeOf();
         render();
+        // Сразу подтягиваем состояние: сервер проставил onboarded,
+        // и знакомство больше не покажется при следующих входах.
+        refresh().catch(function () {});
       });
     },
     "sheet-profile": function () {
@@ -1996,6 +2130,11 @@
       });
     },
     "start-trip": function (el) { run({ op: "driver.start", id: Number(el.dataset.id) }); },
+    "resume-trip": function (el) {
+      // «Продолжить поездку» — останавливает ожидание и возвращает
+      // кнопки «Ожидание» и «Завершить поездку».
+      run({ op: "driver.wait", id: Number(el.dataset.id) });
+    },
     complete: function (el) {
       run({ op: "driver.complete", id: Number(el.dataset.id) });
     },

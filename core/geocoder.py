@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import logging
 import math
+import ssl
+import time
 from typing import List, Optional, Tuple
 
+import certifi
 import httpx
 
 from config import settings
@@ -32,6 +35,107 @@ def _validate_coordinates(lat1, lon1, lat2, lon2) -> bool:
 
 
 SUGGEST_URL = "https://suggest-maps.yandex.ru/v1/suggest"
+
+# --- Кэши (важно для скорости при 50+ одновременных пассажирах) ---
+# Центр города (lat, lon) — чтобы сортировать подсказки «от родного города».
+_CITY_CENTER: dict = {}
+# Кэш подсказок: (запрос, город) -> (время, список)
+_SUGGEST_CACHE: dict = {}
+_SUGGEST_TTL = 120.0        # секунд
+# Кэш геокодирования адресов (одинаковые адреса у 50+ пассажиров)
+_GEOCODE_CACHE: dict = {}
+_GEOCODE_TTL = 600.0        # секунд
+# Один общий HTTP-клиент: без пересоздания соединений каждый запрос.
+# ВАЖНО: клиент привязан к event loop. В проекте запросы выполняются и в
+# основном loop aiohttp, и в отдельном loop (maximus_server.run через
+# asyncio.run) — поэтому держим клиент НА КАЖДЫЙ loop, иначе появляется
+# ошибка «Event loop is closed» и подсказки/геокодинг молча не работают.
+_http_clients: dict = {}
+
+
+_HTTP_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
+
+def _get_client() -> httpx.AsyncClient:
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    key = id(loop) if loop is not None else 0
+    entry = _http_clients.get(key)
+    client = None
+    if entry is not None:
+        # Храним и сам loop: id() может совпасть у нового loop (старый удалён
+        # сборщиком), и тогда мы взяли бы клиент от закрытого loop.
+        if entry[0] is loop and not entry[1].is_closed:
+            client = entry[1]
+    if client is None:
+        # connect-таймаут не должен быть слишком маленьким: TLS-рукопожатие
+        # с suggest-maps.yandex.ru на Windows занимает 2-4 секунды.
+        client = httpx.AsyncClient(
+            trust_env=False,
+            verify=_HTTP_SSL_CONTEXT,
+            timeout=httpx.Timeout(8.0, connect=5.0),
+            limits=httpx.Limits(max_connections=64, max_keepalive_connections=32),
+        )
+        _http_clients[key] = (loop, client)
+    # Не даём словарю расти: закрытые loop'ы накапливают мёртвые клиенты.
+    if len(_http_clients) > 16:
+        for k in list(_http_clients.keys()):
+            if k != key:
+                old_loop, old_client = _http_clients[k]
+                if old_client.is_closed or old_loop is None or old_loop.is_closed():
+                    _http_clients.pop(k, None)
+    return client
+
+
+async def _fetch_json(url: str, params: dict, attempts: int = 2):
+    """GET JSON с одним повтором при сетевой ошибке.
+
+    Публичные API Яндекса иногда отваливаются по таймауту (особенно первое
+    TLS-соединение на Windows) — без повтора подсказки внезапно «пропадают».
+    """
+    import asyncio
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            client = _get_client()
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:  # noqa: BLE001 — сеть/HTTP/JSON
+            last_exc = exc
+            if attempt + 1 < attempts:
+                await asyncio.sleep(0.35)
+    raise last_exc
+
+
+async def city_center(city: str) -> Optional[dict]:
+    """Координаты центра города (кэшируются в памяти)."""
+    key = (city or "").strip().lower()
+    if not key:
+        return None
+    if key in _CITY_CENTER:
+        return _CITY_CENTER[key]
+    coords, _ = await geocode_address(f"{city}, Россия")
+    if coords:
+        _CITY_CENTER[key] = coords
+    return coords
+
+
+def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Быстрое расстояние по прямой (км) — для сортировки подсказок."""
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return r * 2 * math.asin(math.sqrt(a))
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    return _distance_km(lat1, lon1, lat2, lon2)
 
 
 def _extract_city(components) -> str:
@@ -81,17 +185,18 @@ async def geocode_address(address: str) -> Tuple[Optional[dict], str]:
     """
     if not address or not address.strip():
         return None, ""
+    key = " ".join(address.lower().split())
+    cached = _GEOCODE_CACHE.get(key)
+    if cached and (time.time() - cached[0]) < _GEOCODE_TTL:
+        return cached[1], cached[2]
     try:
-        async with httpx.AsyncClient(trust_env=False) as client:
-            params = {
-                "apikey": settings.yandex_api_key,
-                "geocode": address,
-                "format": "json",
-                "results": 1,
-            }
-            resp = await client.get(settings.yandex_geocoder_url, params=params, timeout=3.5)
-            resp.raise_for_status()
-            data = resp.json()
+        params = {
+            "apikey": settings.yandex_api_key,
+            "geocode": address,
+            "format": "json",
+            "results": 1,
+        }
+        data = await _fetch_json(settings.yandex_geocoder_url, params)
     except Exception as exc:
         logger.error("Ошибка геокодирования '%s': %s", address, exc)
         return None, ""
@@ -106,7 +211,13 @@ async def geocode_address(address: str) -> Tuple[Optional[dict], str]:
         meta = geo.get("metaDataProperty", {}).get("GeocoderMetaData", {})
         addr = meta.get("Address", {})
         city = _extract_city(addr.get("Components", []))
-        return {"lat": lat, "lon": lon}, city
+        coords = {"lat": lat, "lon": lon}
+        _GEOCODE_CACHE[key] = (time.time(), coords, city)
+        if len(_GEOCODE_CACHE) > 5000:
+            oldest = sorted(_GEOCODE_CACHE.items(), key=lambda kv: kv[1][0])[:1000]
+            for k, _ in oldest:
+                _GEOCODE_CACHE.pop(k, None)
+        return coords, city
     except (KeyError, IndexError, ValueError) as exc:
         logger.error("Не удалось разобрать ответ геокодера: %s", exc)
         return None, ""
@@ -258,20 +369,41 @@ async def calculate_distance_and_time(lat1, lon1, lat2, lon2,
         # Фолбэк: гаверсинус на дистанцию точка-точка
         return calculate_approximate_distance_and_time(lat1, lon1, lat2, lon2)
 
+    # ВАЖНО: без этой строки функция молча возвращала None (маршрут посчитан,
+    # но результат терялся) — избранное и заказы падали с TypeError.
+    return total_distance, max(2, int(total_duration))
+
 
 async def suggest_address(query: str, city: str = "", limit: int = 8,
                           near_lat: Optional[float] = None,
                           near_lon: Optional[float] = None) -> list:
-    """Подсказки адреса через Yandex Suggest.
+    """Подсказки адреса через Yandex Suggest (быстро, с кэшем).
 
-    Ищет в пределах города (если известен) и отбрасывает чужие регионы.
-    Возвращает: [{"title", "subtitle", "address", "kind"}]
+    Сортировка: ближайшие к «родному городу» (или к переданной точке) —
+    сверху. Если пассажир из Черногорска вводит «Мира 1», первым будет
+    «Мира 1, Черногорск», затем ближайшие населённые пункты по возрастанию
+    расстояния.
+
+    Возвращает: [{"title", "subtitle", "address", "kind", "distance_km"}]
     """
     text = (query or "").strip()
     if len(text) < 2:
         return []
 
     city_part = (city or "").strip()
+    # Кэш: одинаковые запросы от 50 пассажиров не бьют в API по кругу.
+    cache_key = (text.lower(), city_part.lower(), int(limit))
+    cached = _SUGGEST_CACHE.get(cache_key)
+    if cached and (time.time() - cached[0]) < _SUGGEST_TTL:
+        return cached[1]
+
+    # Центр «родного города»: по нему Яндекс сам считает расстояние до каждой
+    # подсказки (поле distance.value, метры) — сортируем по возрастанию,
+    # поэтому сверху оказываются ближайшие адреса.
+    base = None
+    if city_part:
+        base = await city_center(city_part)
+
     search_text = text
     if city_part and city_part.lower() not in text.lower():
         search_text = f"{text}, {city_part}"
@@ -284,63 +416,68 @@ async def suggest_address(query: str, city: str = "", limit: int = 8,
         "print_address": "1",
         "types": "biz,geo",
     }
-    if near_lat is not None and near_lon is not None:
-        params["ll"] = f"{near_lon},{near_lat}"
-        params["spn"] = "0.8,0.8"
+    if base:
+        params["ll"] = f"{base['lon']},{base['lat']}"
+        params["spn"] = "1.0,1.0"
 
     try:
-        async with httpx.AsyncClient(trust_env=False) as client:
-            resp = await client.get(SUGGEST_URL, params=params, timeout=3.5)
-            resp.raise_for_status()
-            data = resp.json()
+        data = await _fetch_json(SUGGEST_URL, params)
     except Exception as exc:
         logger.warning("Suggest недоступен для %r: %s", search_text, exc)
         return []
 
     own_city = city_part.lower()
-    results = []
+    collected = []
     for item in data.get("results") or []:
         title = ((item.get("title") or {}).get("text") or "").strip()
         subtitle = ((item.get("subtitle") or {}).get("text") or "").strip()
-        address = ((item.get("address") or {}).get("formatted_address") or "").strip()
+        addr_obj = item.get("address") or {}
+        address = (addr_obj.get("formatted_address") or "").strip() if isinstance(addr_obj, dict) else ""
         tags = item.get("tags") or []
         if not title:
             continue
-
-        # Отбрасываем сам город и регион — они не адрес
+        # Сам город/регион — не адрес
         if tags and tags[0] in ("locality", "province", "country", "area"):
             continue
 
-        haystack = f"{subtitle} {address}".lower()
-        if own_city and haystack.strip() and own_city not in haystack:
-            continue
+        # Яндекс отдаёт расстояние в метрах при переданном ll
+        dist_km = None
+        d = item.get("distance") or {}
+        if isinstance(d, dict) and d.get("value") is not None:
+            try:
+                dist_km = round(float(d["value"]) / 1000.0, 1)
+            except (TypeError, ValueError):
+                dist_km = None
 
-        results.append({
+        haystack = f"{subtitle} {address}".lower()
+        collected.append({
             "title": title,
             "subtitle": subtitle,
             "address": address or f"{title}, {subtitle}".strip(", "),
             "kind": tags[0] if tags else "",
+            "distance_km": dist_km,
+            "in_city": bool(own_city) and (own_city in haystack),
         })
-        if len(results) >= limit:
-            break
 
-    # Если в своём городе ничего не нашли — показываем результаты без фильтра,
-    # чтобы пассажир мог указать адрес в другом городе (межгород)
-    if not results and city_part:
-        for item in (data.get("results") or [])[:limit]:
-            title = ((item.get("title") or {}).get("text") or "").strip()
-            subtitle = ((item.get("subtitle") or {}).get("text") or "").strip()
-            address = ((item.get("address") or {}).get("formatted_address") or "").strip()
-            tags = item.get("tags") or []
-            if not title:
-                continue
-            if tags and tags[0] in ("locality", "province", "country", "area"):
-                continue
-            results.append({
-                "title": title,
-                "subtitle": subtitle,
-                "address": address or f"{title}, {subtitle}".strip(", "),
-                "kind": tags[0] if tags else "",
-            })
+    def sort_key(row):
+        # 1) свой город — выше; 2) ближе к центру города — выше;
+        # 3) без данных о расстоянии — в конце.
+        return (
+            0 if row.get("in_city") else 1,
+            0 if row.get("distance_km") is not None else 1,
+            row.get("distance_km") if row.get("distance_km") is not None else 10 ** 6,
+        )
 
+    collected.sort(key=sort_key)
+    # Если в своём городе ничего не нашли — отдаём всё (межгород/другой город)
+    results = [r for r in collected if r.get("in_city")] or collected
+    results = results[:limit]
+    for r in results:
+        r.pop("in_city", None)
+    _SUGGEST_CACHE[cache_key] = (time.time(), results)
+    # Не даём кэшу расти бесконечно
+    if len(_SUGGEST_CACHE) > 2000:
+        oldest = sorted(_SUGGEST_CACHE.items(), key=lambda kv: kv[1][0])[:500]
+        for k, _ in oldest:
+            _SUGGEST_CACHE.pop(k, None)
     return results

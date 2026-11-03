@@ -734,6 +734,14 @@ class Storage:
                 "pickup": order.get("pickup") or "",
                 "destination": order.get("destination") or "",
                 "entrance": order.get("entrance") or "",
+                # Сохраняем координаты и города: без них при заказе
+                # геокодер искал адрес «без города» и мог вернуть чужой
+                # регион — цена не пересчитывалась по нужному тарифу.
+                "pickup_coords": order.get("pickup_coords"),
+                "destination_coords": order.get("destination_coords"),
+                "pickup_city": order.get("pickup_city") or "",
+                "destination_city": order.get("destination_city") or "",
+                "waypoints": order.get("waypoints") or [],
                 "added_at": datetime.now().isoformat(),
             }
             if not any(f.get("order_id") == int(order_id) for f in favs):
@@ -760,6 +768,10 @@ class Storage:
                 raise ValueError("Укажите адрес подачи и назначения")
             if not fav.get("label"):
                 fav["label"] = f"{fav['pickup']} → {fav['destination']}"[:80]
+            # Адреса изменили — прежние координаты недействительны,
+            # цену пересчитает сервер при открытии/заказе.
+            fav.pop("pickup_coords", None)
+            fav.pop("destination_coords", None)
             favs[index] = fav
             u["favorites"] = favs
             self.save()
@@ -787,10 +799,15 @@ class Storage:
             "destination": destination,
             "entrance": entrance,
             "label": fav.get("label") or "",
-            "pickup_coords": None if fav.get("pickup") else src.get("pickup_coords"),
-            "destination_coords": None if fav.get("destination") else src.get("destination_coords"),
-            "pickup_city": src.get("pickup_city"),
-            "destination_city": src.get("destination_city"),
+            # Координаты: свои из избранного, иначе из исходного заказа.
+            "pickup_coords": fav.get("pickup_coords") or (None if fav.get("pickup") else src.get("pickup_coords")),
+            "destination_coords": (fav.get("destination_coords")
+                                   or (None if fav.get("destination") else src.get("destination_coords"))),
+            # Город: свой из избранного, иначе из заказа. Нужен, чтобы
+            # применить тариф нужного города (а не случайного региона).
+            "pickup_city": fav.get("pickup_city") or src.get("pickup_city") or "",
+            "destination_city": (fav.get("destination_city")
+                                 or src.get("destination_city") or ""),
             "waypoints": [] if (fav.get("pickup") or fav.get("destination")) else (src.get("waypoints") or []),
             "km": src.get("distance") or 0,
             "minutes": src.get("time_minutes") or 0,
@@ -1530,13 +1547,32 @@ class Storage:
                            period: Optional[str] = None) -> List[Dict[str, Any]]:
         """Завершённые заказы водителя (история), новые первыми.
 
-        period: None — все; "today"/"day" — только за сегодня.
+        period:
+          None                  — все;
+          "today"/"day"         — только за сегодня;
+          "date:YYYY-MM-DD"     — за конкретный календарный день;
+          "days:N"              — за последние N дней.
         """
         since = until = None
+        now = datetime.now()
         if period in ("today", "day"):
-            today = datetime.now().date()
+            today = now.date()
             since = datetime.combine(today, datetime.min.time())
             until = datetime.combine(today + timedelta(days=1), datetime.min.time())
+        elif isinstance(period, str) and period.startswith("date:"):
+            try:
+                d = datetime.strptime(period[5:], "%Y-%m-%d").date()
+            except Exception:
+                d = now.date()
+            since = datetime.combine(d, datetime.min.time())
+            until = datetime.combine(d + timedelta(days=1), datetime.min.time())
+        elif isinstance(period, str) and period.startswith("days:"):
+            try:
+                count = int(period[5:])
+            except Exception:
+                count = 7
+            since = now - timedelta(days=max(1, count))
+            until = now
         result = []
         for o in sorted(self.orders.values(), key=lambda x: x.get("id", 0), reverse=True):
             if o.get("driver_id") != int(driver_id):
@@ -1554,9 +1590,45 @@ class Storage:
                 if not (since <= dt < until):
                     continue
             result.append(o)
-            if len(result) >= limit:
+            if limit and len(result) >= limit:
                 break
         return result
+
+    def get_driver_daily_stats(self, driver_id: int, days: int = 30) -> List[Dict[str, Any]]:
+        """Разбивка по дням для графика: [{date, sum, count}] по возрастанию даты.
+
+        Дни без поездок возвращаются нулями — чтобы график был ровным
+        и под каждым столбиком было видно дату.
+        """
+        now = datetime.now()
+        start = (now - timedelta(days=max(1, int(days)) - 1)).date()
+        buckets: Dict[str, Dict[str, Any]] = {}
+        day = start
+        while day <= now.date():
+            buckets[day.isoformat()] = {"date": day.isoformat(), "sum": 0.0, "count": 0}
+            day += timedelta(days=1)
+        for o in self.orders.values():
+            if o.get("driver_id") != int(driver_id):
+                continue
+            if o.get("status") != "completed":
+                continue
+            ts = o.get("completed_at") or o.get("accepted_at") or o.get("created_at")
+            if not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(ts) if isinstance(ts, str) else ts
+            except Exception:
+                continue
+            key = dt.date().isoformat()
+            if key not in buckets:
+                continue
+            try:
+                amount = float(o.get("price", 0) or 0) + float(o.get("waiting_cost", 0) or 0)
+            except (TypeError, ValueError):
+                amount = 0.0
+            buckets[key]["sum"] = round(buckets[key]["sum"] + amount, 2)
+            buckets[key]["count"] += 1
+        return [buckets[k] for k in sorted(buckets)]
 
     def get_driver_period_stats(self, driver_id: int, period: str = "today") -> Dict[str, Any]:
         """Расширенная статистика водителя за период: day/week/month/all."""

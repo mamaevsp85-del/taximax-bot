@@ -1181,6 +1181,127 @@ select:focus {
 .notify-banner span { flex: 1; }
 
 /* =========================================================
+   Одна длинная кнопка «Сегодня» на главной водителя
+   (заменила две отдельные колонки)
+   ========================================================= */
+.today-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin-top: 12px;
+  padding: 16px 18px;
+  border: 0;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  color: #ffffff;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.24);
+}
+
+.today-row:active { filter: brightness(0.94); }
+
+.today-left,
+.today-right {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.today-left .muted,
+.today-right .muted {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 12px;
+}
+
+.today-right { align-items: flex-end; }
+
+.today-sum {
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+
+.today-count {
+  font-size: 22px;
+  font-weight: 800;
+  color: #facc15;
+  line-height: 1.1;
+}
+
+/* =========================================================
+   График заработка водителя (день / неделя / месяц)
+   ========================================================= */
+.bar-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 190px;
+  margin: 16px 0 6px;
+  padding: 8px 6px 0;
+  border-bottom: 1.5px solid var(--line);
+  overflow-x: auto;
+}
+
+.bar-col {
+  flex: 1 0 auto;
+  min-width: 26px;
+  max-width: 46px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.bar-col .bar-sum {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.bar-col .bar {
+  width: 100%;
+  min-height: 4px;
+  border-radius: 6px 6px 2px 2px;
+  background: linear-gradient(180deg, var(--accent) 0%, #f0b100 100%);
+  transition: filter 0.15s var(--ease);
+}
+
+.bar-col:active .bar { filter: brightness(0.9); }
+
+.bar-col .bar-count {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--ink);
+}
+
+.bar-col .bar-day {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.chart-total {
+  margin-top: 2px;
+}
+
+.chart-total .stat {
+  padding: 10px 12px;
+}
+
+/* =========================================================
    Таймер ожидания (виден водителю и пассажиру)
    ========================================================= */
 .wait-card {

@@ -52,18 +52,48 @@ ACTIVE = ("pending", "accepted", "driver_arrived", "in_progress")
 PORT = int(os.environ.get("MINIAPP_PORT", "8765"))
 
 
+_loop_lock = None
+_loop = None
+_loop_thread = None
+
+
+def _get_loop():
+    """Один постоянный event loop в отдельном потоке.
+
+    ВАЖНО: раньше на каждый вызов run() создавался НОВЫЙ loop через
+    asyncio.run(). Из-за этого HTTP-клиент геокодера/подсказок создавался
+    заново и каждый раз заново проходил TLS-рукопожатие — отсюда «думает
+    по полминуты». Теперь loop один, соединения переиспользуются.
+    """
+    global _loop, _loop_thread, _loop_lock
+    import threading
+    if _loop_lock is None:
+        _loop_lock = threading.Lock()
+    with _loop_lock:
+        if _loop is None or _loop.is_closed():
+            _loop = asyncio.new_event_loop()
+            _loop_thread = threading.Thread(target=_loop.run_forever, daemon=True,
+                                            name="maximus-asyncio")
+            _loop_thread.start()
+    return _loop
+
+
 def run(coro):
-    """Безопасно выполняет корутину, независимо от того, запущен ли event loop."""
+    """Выполнить корутину в ЕДИНОМ постоянном loop'е.
+
+    Раньше при вызове из api_server (aiohttp) создавался новый loop на каждый
+    запрос — соединения не переиспользовались, и каждый раз заново шло
+    TLS-рукопожатие (подсказки адреса «думали» по 10-30 секунд).
+    """
     try:
-        asyncio.get_running_loop()
+        running = asyncio.get_running_loop()
     except RuntimeError:
-        # Нет запущенного event loop (например, бот с ThreadingHTTPServer)
+        running = None
+    loop = _get_loop()
+    if running is loop:
+        # Уже внутри общего loop'а — ждать себя нельзя, выполняем напрямую
         return asyncio.run(coro)
-    # Есть запущенный event loop (например, aiohttp в api_server.py)
-    # Запускаем корутину в отдельном потоке, чтобы не блокировать текущий loop
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
+    return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
 
 def uid_from(handler, body: dict | None = None) -> int:
@@ -237,13 +267,17 @@ def _profile_complete(user: dict) -> bool:
 
 
 def _needs_onboarding(user: dict) -> bool:
-    """Знакомство показываем ровно один раз.
+    """Регистрация (имя + телефон + город) — ТОЛЬКО при первом входе.
 
-    Достаточно имени и телефона — их собирает и бот, и мини-апп.
-    Если пользователь уже проходил знакомство (флаг onboarded) — не спрашиваем.
+    После прохождения ставится флаг ``onboarded``, и больше знакомство
+    не показывается никогда — даже если пользователь потом очистил
+    какое-то поле профиля (например, город).
     """
     if user.get("onboarded"):
         return False
+    if user.get("onboarding_started_at") or user.get("onboarded_at"):
+        # Начал, но не закончил — всё равно спрашиваем, пока не заполнит.
+        return not _profile_complete(user)
     return not _profile_complete(user)
 
 
@@ -340,12 +374,31 @@ def driver_block(uid: int) -> dict:
     today_orders = [brief_order(o) for o in S.get_driver_history(uid, 40, period="today")]
     tariffs = S.get_access_tariffs()
     today_stats = S.get_driver_stats(uid, "today")
+    # Сколько заказов прямо сейчас ждут водителя (по всей базе) —
+    # показываем в пункте «Список заказов».
+    pending_waiting = 0
+    try:
+        for o in S.orders.values():
+            if o.get("status") == "pending" and not o.get("driver_id"):
+                pending_waiting += 1
+    except Exception:
+        pending_waiting = 0
+    # Разбивка по дням для графика (день/неделя/месяц).
+    daily = {}
+    for key, days in (("day", 1), ("week", 7), ("month", 30)):
+        try:
+            daily[key] = S.get_driver_daily_stats(uid, days)
+        except Exception:
+            daily[key] = []
     return {
         "available": available,
+        "available_count": len(available),
+        "pending_waiting": pending_waiting,
         "current": brief_order(current) if current else None,
         "history": history,
         "today_orders": today_orders,
         "today": today_stats,
+        "daily": daily,
         "stats": {p: S.get_driver_period_stats(uid, p) for p in ("day", "week", "month", "all")},
         "transactions": S.get_transaction_history(uid, 12),
         "tariffs": {str(k): v for k, v in tariffs.items()},
@@ -445,26 +498,44 @@ async def route_fast(points: list) -> tuple:
 
 def quote(pickup: str, dest: str, stop: str = "",
           pickup_coords: dict | None = None,
-          dest_coords: dict | None = None) -> dict:
+          dest_coords: dict | None = None,
+          pickup_city: str = "",
+          destination_city: str = "") -> dict:
+    """Расчёт маршрута и цены.
+
+    ``pickup_city``/``destination_city`` — подсказка города (например, из
+    избранного маршрута или из заказа). ВАЖНО: без неё геокодер может найти
+    «Мира 1а» в другом регионе (Владимир вместо Черногорска), и тогда
+    применится чужой тариф — цена «не пересчитывается».
+    """
+    hint_pickup_city = (pickup_city or "").strip()
+    hint_dest_city = (destination_city or "").strip()
+
     async def work():
         # Если координаты уже известны (геолокация), используем их напрямую
         pc = _coords_or_none(pickup_coords)
         dc = _coords_or_none(dest_coords)
-        city1 = city2 = ""
+        city1 = hint_pickup_city or ""
+        city2 = hint_dest_city or ""
 
         # Подача и назначение ищутся одновременно: так расчёт не ждёт
         # два запроса к геокодеру друг за другом.
         if pc is None and dc is None:
-            (pc, city1), (dc, city2) = await asyncio.gather(
+            (pc, gcity1), (dc, gcity2) = await asyncio.gather(
                 geo_cached(pickup), geo_cached(dest))
+            city1 = city1 or gcity1
+            city2 = city2 or gcity2
         elif pc is None:
-            pc, city1 = await geo_cached(pickup)
+            pc, gcity1 = await geo_cached(pickup)
+            city1 = city1 or gcity1
         elif dc is None:
-            dc, city2 = await geo_cached(dest)
+            dc, gcity2 = await geo_cached(dest)
+            city2 = city2 or gcity2
         if not pc:
             raise ValueError("Не удалось найти адрес подачи")
         if not dc:
-            dc, city2 = await geo_cached(dest)
+            dc, gcity2 = await geo_cached(dest)
+            city2 = city2 or gcity2
         if pc and not city1 and dc and not city2:
             city1, city2 = await asyncio.gather(
                 _city_by_coords(pc["lat"], pc["lon"]),
@@ -729,9 +800,25 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 def _favorite_draft(uid: int, index: int) -> dict:
     """Маршрут из избранного для экрана подтверждения, без создания заказа.
 
-    Цену всегда пересчитываем по актуальному тарифу (тарифы могли измениться).
+    Цену ВСЕГДА пересчитываем по актуальному тарифу (тарифы могли измениться).
+    Город подачи берём из избранного, а если его нет — из профиля пассажира
+    (home_city). Без города геокодер находил «Мира 1а» в другом регионе
+    (например, во Владимире) и применялся чужой тариф — цена «не менялась».
     """
     route = S.favorite_route(uid, index)
+    user = S.get_user(uid) or {}
+    home_city = (user.get("home_city") or "").strip()
+    # Город-подсказка: сохранённый в избранном → город профиля.
+    hint_city = (route.get("pickup_city") or home_city or "").strip()
+    # Если сохранённый город не совпадает с домашним — доверяем домашнему:
+    # это типичный случай, когда адрес когда-то нашёлся в чужом регионе.
+    stale_coords = False
+    if home_city and route.get("pickup_city") and \
+            normalize_city(route["pickup_city"]) != normalize_city(home_city):
+        hint_city = home_city
+        # Координаты от «чужого» города больше не действительны —
+        # без сброса геокодер снова вернёт Владимир.
+        stale_coords = True
     wps = route.get("waypoints") or []
     draft = {
         "pickup": route["pickup"],
@@ -759,8 +846,12 @@ def _favorite_draft(uid: int, index: int) -> dict:
     try:
         fresh = quote(
             route["pickup"], route["destination"], stop=stop_text,
-            pickup_coords=route.get("pickup_coords"),
-            dest_coords=route.get("destination_coords"),
+            pickup_coords=None if stale_coords else route.get("pickup_coords"),
+            dest_coords=None if stale_coords else route.get("destination_coords"),
+            # Подсказка города: без неё геокодер может найти «Мира 1а»
+            # во Владимире и применить чужой тариф — цена не пересчитается.
+            pickup_city=hint_city,
+            destination_city=hint_city or (route.get("destination_city") or ""),
         )
         # Если в избранном больше одной остановки — сохраняем их и
         # пересчитываем цену с полной наценкой за каждую точку.
@@ -1105,6 +1196,8 @@ def act(uid: int, body: dict) -> dict:
             body.get("stop", ""),
             pickup_coords=body.get("pickup_coords"),
             dest_coords=body.get("dest_coords") or body.get("destination_coords"),
+            pickup_city=body.get("pickup_city", ""),
+            destination_city=body.get("destination_city", ""),
         )}
     if op == "order.create":
         # Заказ нельзя создать, пока не пройдено знакомство
@@ -1112,8 +1205,24 @@ def act(uid: int, body: dict) -> dict:
         if _needs_onboarding(u):
             raise ValueError("Заполните профиль: имя, телефон и город")
         draft = body.get("draft") or {}
-        if not draft.get("pickup_coords"):
-            draft = quote(draft.get("pickup", ""), draft.get("destination", ""), draft.get("stop", ""))
+        # ВАЖНО: цена всегда пересчитывается по АКТУАЛЬНОМУ тарифу.
+        # Если заказ создаётся из избранного, в draft лежит старая цена —
+        # тарифы могли измениться, поэтому делаем quote заново.
+        if body.get("from_favorite") or draft.get("favoriteIndex") is not None \
+                or not draft.get("pickup_coords"):
+            fresh = quote(
+                draft.get("pickup", ""), draft.get("destination", ""),
+                draft.get("stop", ""),
+                pickup_coords=draft.get("pickup_coords"),
+                dest_coords=draft.get("dest_coords") or draft.get("destination_coords"),
+                pickup_city=draft.get("pickup_city", ""),
+                destination_city=draft.get("destination_city", ""),
+            )
+            # Сохраняем служебные поля из черновика
+            for key in ("entrance", "favoriteIndex", "label"):
+                if draft.get(key) is not None:
+                    fresh[key] = draft[key]
+            draft = fresh
         price = body.get("price")
         if price is not None:
             try:
@@ -1132,6 +1241,10 @@ def act(uid: int, body: dict) -> dict:
             raise ValueError("Нет доступа к заказу")
         if order.get("status") not in ("pending", "accepted", "driver_arrived", "in_progress"):
             raise ValueError("Маршрут этого заказа уже нельзя менять")
+        # ВОДИТЕЛЬ НЕ может менять адрес/остановки вообще: маршрут меняет
+        # только пассажир. Даже пока водитель едет к подаче — нельзя.
+        if uid == order.get("driver_id"):
+            raise ValueError("Адрес меняет только пассажир")
         dest = (body.get("destination") or order.get("destination") or "").strip()
         stop = (body.get("stop") or "").strip()
         if len(dest) < 3:
@@ -1140,6 +1253,8 @@ def act(uid: int, body: dict) -> dict:
             order.get("pickup") or "", dest, stop,
             pickup_coords=order.get("pickup_coords"),
             dest_coords=body.get("destination_coords") or body.get("dest_coords"),
+            pickup_city=order.get("pickup_city") or "",
+            destination_city=body.get("destination_city") or "",
         )
         S.update_order(
             order["id"],
@@ -1280,9 +1395,11 @@ def act(uid: int, body: dict) -> dict:
         return {"ok": True, "chat": chat[-40:]}
     if op == "favorite.add":
         order = own_order(uid, int(body["id"]))
-        label = f"{order.get('pickup', '')} → {order.get('destination', '')}"
+        default_label = f"{order.get('pickup', '')} → {order.get('destination', '')}"
+        # Пассажир может дать своё название («На работу», «В школу» и т.п.)
+        label = str(body.get("label") or "").strip() or default_label
         S.add_favorite(uid, order["id"], label=label[:80])
-        return {"ok": True}
+        return {"ok": True, "label": label[:80]}
     if op == "favorite.edit":
         pickup = (body.get("pickup") or "").strip()
         destination = (body.get("destination") or "").strip()
@@ -1487,6 +1604,27 @@ def act(uid: int, body: dict) -> dict:
         except (TypeError, ValueError):
             lat = lon = None
         return {"ok": True, "order": complete(uid, int(body["id"]), lat, lon)}
+    if op == "driver.day":
+        # Полный список завершённых заявок за выбранный день — для графика
+        # заработка в Mini-App (не только последние 30 из ленты истории).
+        must_role(uid, "driver")
+        date = (body.get("date") or "").strip()
+        if len(date) != 10 or ":" in date:
+            raise ValueError("Укажите дату YYYY-MM-DD")
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError("Укажите дату YYYY-MM-DD")
+        orders = S.get_driver_history(uid, 1000, period=f"date:{date}")
+        total = 0.0
+        count = len(orders)
+        for o in orders:
+            try:
+                total += float(o.get("price") or 0) + float(o.get("waiting_cost") or 0)
+            except (TypeError, ValueError):
+                pass
+        return {"ok": True, "date": date, "sum": round(total, 2), "count": count,
+                "orders": [brief_order(o) for o in orders]}
     if op == "driver.cancel":
         order = own_order(uid, int(body["id"]), as_driver=True)
         if order.get("status") not in ACTIVE:

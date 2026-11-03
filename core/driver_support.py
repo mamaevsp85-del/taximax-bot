@@ -623,27 +623,57 @@ def driver_main_header(user_id: int) -> str:
 
 def generate_navigation_url(order: Dict[str, Any], phase: str = "to_pickup",
                             include_waypoints: bool = True) -> str:
-    """URL Яндекс.Карт для навигации (подача → назначение с промежуточными точками)."""
-    coords = []
-    if phase == "to_pickup" and order.get("pickup_coords"):
-        coords.append(order["pickup_coords"])
-        if order.get("destination_coords") and include_waypoints:
+    """URL Яндекс.Карт для навигации: подача -> остановки -> назначение.
+
+    ВАЖНО: промежуточные точки хранятся как {"text", "lat", "lon"}
+    (геокодер кладёт именно lat/lon). Раньше проверялись только ключи
+    latitude/longitude, поэтому навигатор вёл сразу из А в Б и пропускал
+    промежуточные адреса. Теперь поддерживаются оба формата.
+    """
+    def _point(raw: Any) -> Optional[str]:
+        if not isinstance(raw, dict):
+            return None
+        lat = raw.get("lat", raw.get("latitude"))
+        lon = raw.get("lon", raw.get("longitude"))
+        try:
+            lat = float(lat)
+            lon = float(lon)
+        except (TypeError, ValueError):
+            return None
+        if lat == 0 and lon == 0:
+            return None
+        return f"{lat},{lon}"
+
+    coords: List[str] = []
+    if phase == "to_pickup":
+        first = _point(order.get("pickup_coords"))
+        if first:
+            coords.append(first)
+        if include_waypoints:
             for wp in order.get("waypoints") or []:
-                if isinstance(wp, dict) and wp.get("latitude") and wp.get("longitude"):
-                    coords.append({"latitude": wp["latitude"], "longitude": wp["longitude"]})
-            coords.append(order["destination_coords"])
+                pt = _point(wp)
+                if pt:
+                    coords.append(pt)
+        last = _point(order.get("destination_coords"))
+        if last:
+            coords.append(last)
     else:
-        coords.append(order.get("destination_coords") or order.get("pickup_coords") or {}
-)
-    lat_lon = []
+        end = _point(order.get("destination_coords")) or _point(order.get("pickup_coords"))
+        if end:
+            coords.append(end)
+
+    # Убираем дубли подряд: Яндекс.Карты на них ругаются
+    deduped: List[str] = []
     for c in coords:
-        lat = c.get("latitude") or c.get("lat")
-        lon = c.get("longitude") or c.get("lon")
-        if lat and lon:
-            lat_lon.append(f"{lat},{lon}")
-    if not lat_lon:
+        if not deduped or deduped[-1] != c:
+            deduped.append(c)
+
+    if not deduped:
         return "https://yandex.ru/maps"
-    return f"https://yandex.ru/maps/?rtt=auto&rtext={'~'.join(lat_lon)}&rview=0&mode=driving"
+    if len(deduped) == 1:
+        return f"https://yandex.ru/maps/?pt={deduped[0]}&z=17&mode=search"
+    return (f"https://yandex.ru/maps/?rtt=auto&rtext={'~'.join(deduped)}"
+            f"&rview=0&mode=driving")
 
 
 def calculate_haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -679,12 +709,19 @@ def order_management_rows(order_id: int, order: Dict[str, Any]) -> List[List[Dic
             rows.append(_row("❌ Отменить заказ", f"driver:cancel_order:{order_id}"))
             rows.append(_row("📋 Список заказов", "driver:orders_available"))
         if status == "in_progress":
-            # Menu "поехали": "Завершить поездку, Начать/Остановить ожидание, Навигация, Текущий заказ"
-            rows.append(_row("✅ Завершить поездку", f"driver:complete_trip:{order_id}"))
-            if order.get("waiting_started_at"):
-                rows.append(_row("⏹ Остановить ожидание", f"driver:wait_stop:{order_id}"))
+            # Меню в пути. Пока водитель не нажал «Ожидание» — видны
+            # «Завершить поездку» и «Начать ожидание». После нажатия
+            # «Ожидание» обе кнопки исчезают и остаётся «▶ Продолжить
+            # поездку»; по ней возвращаются исходные две кнопки.
+            waiting_now = bool(order.get("waiting_started_at")
+                               and not order.get("waiting_ended_at"))
+            if waiting_now:
+                rows.append(_row("▶ Продолжить поездку",
+                                 f"driver:wait_stop:{order_id}"))
             else:
-                rows.append(_row("⏱ Начать ожидание", f"driver:wait_start:{order_id}"))
+                rows.append(_row("✅ Завершить поездку",
+                                 f"driver:complete_trip:{order_id}"))
+                rows.append(_row("⏱ Ожидание", f"driver:wait_start:{order_id}"))
             rows.append(_row("🗺 Навигация", f"driver:yandex_nav:{order_id}"))
             rows.append(_row("📋 Текущий заказ", "driver:current_order"))
 
