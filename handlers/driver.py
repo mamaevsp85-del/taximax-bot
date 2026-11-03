@@ -23,7 +23,7 @@ from core.driver_support import (
     moderation_block_rows, order_management_rows, get_waiting_info,
     _driver_is_admin_or_manager,
     calculate_waiting_cost, start_waiting, stop_waiting, cancel_waiting_ticker,
-    generate_navigation_url, fmt_price, time_based_greeting, build_order_card_text,
+    generate_navigation_url, generate_google_navigation_url, fmt_price, time_based_greeting, build_order_card_text,
     start_relay_session, get_active_relay_for_user, get_relay_partner_id,
     stop_relay_session, track_sent_message, clear_driver_chat_messages,
     get_last_menu_message_id, set_last_menu_message_id,
@@ -1274,7 +1274,7 @@ async def driver_arrived(client, user_id, update, ctx):
     )
 
 async def driver_yandex_nav(client, user_id, update, ctx):
-    """Открыть навигацию (Yandex/Google) к точке."""
+    """Открыть навигацию к точке с учётом всех промежуточных адресов."""
     await _answer_cb(client, update)
     oid_str = _cb_id_val(update, "driver:yandex_nav:")
     try:
@@ -1285,11 +1285,30 @@ async def driver_yandex_nav(client, user_id, update, ctx):
     if not order:
         await _Reply(client, user_id).send("❌ Заказ не найден.", keyboard=back_to_main_rows())
         return
-    nav_url = generate_navigation_url(order, phase="to_pickup")
-    rows = [[link_button("🗺 Яндекс.Навигатор", nav_url)],
-            [link_button("🗺 Google Maps", nav_url)],
+    status = order.get("status")
+    # К пассажиру едем только пока он не в машине. В пути ведём по маршруту
+    # подача → остановки → назначение (иначе навигатор «терял» остановки).
+    phase = "to_pickup" if status in ("accepted", "driver_arrived") else "in_trip"
+    start = None
+    loc = (S.get_user(user_id) or {}).get("last_location") or {}
+    if isinstance(loc, dict):
+        try:
+            start = (float(loc["lat"]), float(loc["lon"]))
+        except (KeyError, TypeError, ValueError):
+            start = None
+    yandex_url = generate_navigation_url(order, phase=phase, start=start)
+    google_url = generate_google_navigation_url(order, phase=phase, start=start)
+    stops = [w.get("text") for w in (order.get("waypoints") or []) if isinstance(w, dict)]
+    route_note = ""
+    if stops:
+        route_note = "\n\n⏸ Остановки по пути:\n" + "\n".join(
+            f"  • {s}" for s in stops if s)
+    rows = [[link_button("🗺 Яндекс.Навигатор", yandex_url)],
+            [link_button("🗺 Google Maps", google_url)],
             [callback_button("◀️ Назад", "driver:current_order")]]
-    await _Reply(client, user_id).send("🗺 Навигация к точке подачи:", keyboard=rows)
+    title = ("🗺 Навигация к точке подачи:" if phase == "to_pickup"
+             else "🗺 Навигация по маршруту:")
+    await _Reply(client, user_id).send(title + route_note, keyboard=rows)
 
 
 async def driver_report_waiting(client, user_id, update, ctx):

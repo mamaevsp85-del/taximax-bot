@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import asyncio
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
@@ -48,7 +50,8 @@ class GeocoderCacheTests(unittest.IsolatedAsyncioTestCase):
         self.geocoder._CITY_CENTER.clear()
 
     async def test_suggest_puts_own_city_first(self):
-        """Адреса своего города — выше чужих, даже если чужой ближе к метке."""
+        """Сначала адреса родного города (по возрастанию расстояния), затем
+        ближайшие населённые пункты — тоже по возрастанию расстояния."""
         payload = _suggest_payload([
             _item("улица Мира, 1", "Владимир, Владимирская область", 100),
             _item("улица Мира, 1а", "Черногорск, Республика Хакасия", 3000),
@@ -63,12 +66,13 @@ class GeocoderCacheTests(unittest.IsolatedAsyncioTestCase):
                           lambda city: _async_value({"lat": 53.8, "lon": 91.3})):
             items = await self.geocoder.suggest_address(
                 "Мира 1 сортировка", city="Черногорск", limit=5)
-        # Чужой регион (Владимир) отбрасывается, когда в своём городе есть адреса
-        self.assertEqual(len(items), 2)
-        for it in items:
-            self.assertIn("Черногорск", it["subtitle"])
-        # И внутри своего города — по возрастанию расстояния
+        self.assertEqual(len(items), 3)
+        # Свой город — первым, внутри своего города — ближний выше.
+        self.assertIn("Черногорск", items[0]["subtitle"])
+        self.assertIn("Черногорск", items[1]["subtitle"])
         self.assertLessEqual(items[0]["distance_km"], items[1]["distance_km"])
+        # Чужой регион не выбрасываем, но он идёт строго последним.
+        self.assertIn("Владимир", items[2]["subtitle"])
 
     async def test_suggest_cached_second_call_no_request(self):
         calls = {"n": 0}
@@ -112,6 +116,53 @@ class GeocoderCacheTests(unittest.IsolatedAsyncioTestCase):
             items = await self.geocoder.suggest_address("Мира все", limit=5)
         self.assertEqual(len(items), 2)
         self.assertNotIn("in_city", items[0])
+        # Без города порядок — по расстоянию от точки отсчёта.
+        self.assertLessEqual(items[0]["distance_km"], items[1]["distance_km"])
+
+    async def test_concurrent_requests_share_one_api_call(self):
+        """50 пассажиров с одинаковым запросом = 1 запрос к Яндексу."""
+        calls = {"n": 0}
+        payload = _suggest_payload([
+            _item("улица Мира, 38", "Черногорск, Республика Хакасия", 100),
+        ])
+
+        async def fake(url, params, attempts=2):
+            calls["n"] += 1
+            await asyncio.sleep(0.05)
+            return payload
+
+        with patch.object(self.geocoder, "_fetch_json", fake), \
+             patch.object(self.geocoder, "city_center",
+                          lambda city: _async_value({"lat": 53.8, "lon": 91.3})):
+            results = await asyncio.gather(*[
+                self.geocoder.suggest_address("Мира параллель", city="Черногорск",
+                                              limit=5)
+                for _ in range(50)
+            ])
+        self.assertEqual(calls["n"], 1)
+        for r in results:
+            self.assertEqual(len(r), 1)
+
+    async def test_near_point_used_as_reference(self):
+        """Если передана точка пассажира — ll берётся из неё, без геокодинга."""
+        seen = {}
+
+        async def fake(url, params, attempts=2):
+            seen.update(params)
+            return _suggest_payload([
+                _item("улица Мира, 38", "Черногорск, Республика Хакасия", 100),
+            ])
+
+        async def boom(city):
+            raise AssertionError("city_center не должен вызываться")
+
+        with patch.object(self.geocoder, "_fetch_json", fake), \
+             patch.object(self.geocoder, "city_center", boom):
+            items = await self.geocoder.suggest_address(
+                "Мира рядом", city="Черногорск", limit=5,
+                near_lat=53.81, near_lon=91.32)
+        self.assertTrue(items)
+        self.assertEqual(seen.get("ll"), "91.32,53.81")
 
 
 class DistanceCalcTests(unittest.IsolatedAsyncioTestCase):

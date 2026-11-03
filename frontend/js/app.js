@@ -247,6 +247,46 @@
       "<small>" + esc(o.destination) + "</small></div><div class=\"muted\" style=\"margin-top:6px\">#" + o.id + " · " +
       Number(o.distance || 0).toFixed(1) + " км</div></button>";
   }
+  // Ссылка на маршрут для Яндекс.Карт: подача → остановки → назначение.
+  // Раньше Mini-App открывал поиск по одному адресу, и навигатор вёл
+  // «из А в Б», пропуская промежуточные точки.
+  function navRoute(o, phase) {
+    function pt(raw) {
+      if (!raw || typeof raw !== "object") return "";
+      var lat = raw.lat != null ? raw.lat : raw.latitude;
+      var lon = raw.lon != null ? raw.lon : raw.longitude;
+      var la = parseFloat(lat), lo = parseFloat(lon);
+      if (!isFinite(la) || !isFinite(lo) || (la === 0 && lo === 0)) return "";
+      return la + "," + lo;
+    }
+    var points = [];
+    if (phase === "in_trip") {
+      var start = pt(o.pickup_coords);
+      if (start) points.push(start);
+      (o.waypoints || []).forEach(function (w) {
+        var wpt = pt(typeof w === "string" ? null : w);
+        if (wpt) points.push(wpt);
+      });
+      var end = pt(o.destination_coords);
+      if (end) points.push(end);
+    } else {
+      var pick = pt(o.pickup_coords);
+      if (pick) points.push(pick);
+    }
+    var uniq = [];
+    points.forEach(function (p) {
+      if (!uniq.length || uniq[uniq.length - 1] !== p) uniq.push(p);
+    });
+    if (uniq.length >= 2) {
+      return "https://yandex.ru/maps/?rtt=auto&rtext=" + uniq.join("~") +
+        "&rview=0&mode=driving";
+    }
+    if (uniq.length === 1) {
+      return "https://yandex.ru/maps/?pt=" + uniq[0] + "&z=17&mode=search";
+    }
+    var text = phase === "in_trip" ? (o.destination || "") : (o.pickup || "");
+    return "https://yandex.ru/maps/?text=" + encodeURIComponent(text);
+  }
   function orderById(id) {
     var pool = [].concat(
       (S && S.passenger && S.passenger.orders) || [],
@@ -324,6 +364,30 @@
       '<p class="muted">Добавим адреса в избранное — заказ в один клик в следующий раз.</p>' +
       '<button class="btn yellow" data-act="fav-add" data-id="' + o.id + '">⭐ В избранное</button>' +
       '<button class="btn ghost" data-act="tab" data-screen="home">Не сейчас</button></div>';
+  }
+  // Сохранение в избранное ВСЕГДА с названием: «На работу», «В школу»…
+  function openFavNaming(oid) {
+    oid = Number(oid) || 0;
+    if (!oid) { toast("Маршрут не найден"); return; }
+    window._favOrder = oid;
+    var o = orderById(oid) || {};
+    // Подсказываем название по времени суток: утром — на работу, вечером — домой.
+    var hour = new Date().getHours();
+    var hint = hour < 12 ? "💼 На работу" : hour < 18 ? "🛒 Магазин" : "🏠 Домой";
+    var presets = ["🏠 Домой", "💼 На работу", "🏫 В школу", "🏋️ Тренировка",
+      "🛒 Магазин", "🎓 Учёба"];
+    var chips = presets.map(function (p) {
+      var cls = p === hint ? "chip on" : "chip";
+      return '<button type="button" class="' + cls +
+        '" data-act="fav-name" data-name="' + esc(p) + '">' + esc(p) + "</button>";
+    }).join("");
+    sheet("<h2>Назовите поездку</h2>" +
+      '<p class="muted">' + esc(o.pickup || "") + " → " + esc(o.destination || "") + "</p>" +
+      '<p class="muted">Выберите готовое название или введите своё — потом заказ в один клик.</p>' +
+      '<div class="chips">' + chips + "</div>" +
+      field("favname", "Название", "", "Например, На работу") +
+      '<button class="btn" data-act="fav-save-do" data-id="' + oid + '">Сохранить в избранное</button>' +
+      '<button class="btn ghost" data-act="fav-skip">Не сохранять</button>');
   }
   function field(id, label, value, placeholder) {
     return '<label class="field"><span>' + label + '</span><input id="' + id + '" value="' + esc(value || "") + '" placeholder="' + esc(placeholder || "") + '"></label>';
@@ -785,15 +849,14 @@
         '</b><div class="muted">' + esc([u.car_model, u.car_number].filter(Boolean).join(" · ")) + "</div></div>" +
         '<span class="badge ' + (u.line === "online" ? "ok" : "off") + '">' + line + "</span></div>" +
         '<div class="seg" style="margin-top:12px">' +
-        seg("online", "На линии") + seg("break", "Перерыв") + seg("offline", "Оффлайн") + "</div></div>" +
-        // Одна длинная кнопка «Сегодня»: и заработок, и количество заявок.
-        // (Раньше было две отдельные колонки — убрали по просьбе.)
+        seg("online", "На линии") + seg("break", "Перерыв") + seg("offline", "Оффлайн") + "</div>" +
+        // Одна длинная кнопка «Сегодня» внутри блока статуса
+        // (вместо двух колонок «Сегодня» и «Заявок»).
         '<button class="today-row" data-act="tab" data-screen="d-today">' +
-        '<span class="today-left"><span class="muted">Сегодня</span>' +
-        '<b class="today-sum">' + money(todayEarn) + "</b></span>" +
-        '<span class="today-right"><span class="muted">Заявок</span>' +
-        '<b class="today-count">' + todayCount + "</b></span>" +
-        "</button>" +
+        '<span class="today-label">Сегодня</span>' +
+        '<b class="today-sum">' + money(todayEarn) + "</b>" +
+        '<span class="today-count">' + todayCount + " заявок</span>" +
+        "</button></div>" +
         (S.driver.current ? orderCard(S.driver.current, "d-open") : "") +
         group("На линии") +
         '<div class="grid">' +
@@ -959,7 +1022,9 @@
         routeEdit +
         actions +
         '<div class="btn-row">' +
-          '<button class="btn ghost" data-act="nav" data-q="' + esc(o.status === "in_progress" ? o.destination : o.pickup) + '">Навигация</button>' +
+          '<button class="btn ghost" data-act="nav" data-id="' + o.id + '" data-phase="' +
+            (o.status === "in_progress" ? "in_trip" : "to_pickup") + '">Навигация' +
+            ((o.waypoints || []).length ? " · " + o.waypoints.length + " т." : "") + '</button>' +
           '<button class="btn ghost" data-act="sheet-chat" data-id="' + o.id + '">Написать</button>' +
         '</div>' +
         '<button class="btn ghost" data-act="max-call" data-id="' + o.id + '" data-peer="' + esc(o.passenger_id || "") + '" data-phone="' + esc(o.passenger_phone || "") + '">📞 Позвонить через MAX</button>' +
@@ -1813,7 +1878,7 @@
     },
     "sheet-complaint": function (el) { sheet("<h2>Жалоба</h2>" + field("complaint", "Что не совпало", "", "номер, цвет, водитель") + '<button class="btn" data-act="save-complaint" data-id="' + el.dataset.id + '">Отправить</button>'); },
     "save-complaint": function (el) { closeSheet(); run({ op: "order.complaint", id: Number(el.dataset.id), text: val("complaint") }); },
-    "fav-add": function (el) { run({ op: "favorite.add", id: Number(el.dataset.id) }).then(function () { toast("В избранном"); }); },
+    "fav-add": function (el) { openFavNaming(Number(el.dataset.id)); },
     "del-fav": function (el) {
       var index = Number(el.dataset.index);
       var fav = ((S.passenger && S.passenger.favorites) || [])[index] || {};
@@ -1858,31 +1923,24 @@
         go("fav-offer");
       });
     },
-    "fav-save": function () {
-      var oid = window._favOrder;
-      if (!oid) { screen = "home"; render(); return; }
-      var o = orderById(oid) || {};
-      // Предлагаем дать маршруту понятное название: «На работу», «В школу»…
-      var presets = ["🏠 Домой", "💼 На работу", "🏫 В школу", "🏋️ Тренировка", "🛒 Магазин"];
-      sheet("<h2>Название маршрута</h2>" +
-        '<p class="muted">' + esc(o.pickup || "") + " → " + esc(o.destination || "") + "</p>" +
-        '<div class="chips">' + presets.map(function (p) {
-          return '<button type="button" data-act="fav-name" data-name="' + esc(p) + '">' + esc(p) + "</button>";
-        }).join("") + "</div>" +
-        field("favname", "Название", "", "Например, На работу") +
-        '<button class="btn" data-act="fav-save-do">Сохранить в избранное</button>' +
-        '<button class="btn ghost" data-act="fav-skip">Не сохранять</button>');
-    },
+    "fav-save": function () { openFavNaming(window._favOrder); },
     "fav-name": function (el) {
       var input = document.getElementById("favname");
-      if (input) input.value = el.dataset.name || "";
+      if (!input) return;
+      input.value = el.dataset.name || "";
+      // Подсвечиваем выбранный вариант, чтобы было видно, что уйдёт в название.
+      var chips = document.querySelectorAll(".chips .chip");
+      for (var i = 0; i < chips.length; i++) {
+        chips[i].classList.toggle("on", chips[i] === el);
+      }
+      input.focus();
     },
-    "fav-save-do": function () {
-      var oid = window._favOrder;
+    "fav-save-do": function (el) {
+      var oid = window._favOrder || Number(el && el.dataset && el.dataset.id) || 0;
       if (!oid) { closeSheet(); screen = "home"; render(); return; }
       var label = val("favname");
       closeSheet();
-      run({ op: "favorite.add", id: oid, label: label }).then(function (ok) {
+      run({ op: "favorite.add", id: Number(oid), label: label }).then(function (ok) {
         if (ok) toast(label ? "Сохранено: " + label : "Маршрут сохранён в избранное");
         window._favOrder = null;
         screen = "home";
@@ -2147,7 +2205,23 @@
     topup: function () { closeSheet(); run({ op: "driver.topup", amount: Number(val("amount")) }); },
     buy: function (el) { run({ op: "driver.buy", hours: Number(el.dataset.hours) }); },
     help: function () { toast("Линия, список, текущий рейс и профиль — как в боте"); },
-    nav: function (el) { window.Maximus.openLink("https://yandex.ru/maps/?text=" + encodeURIComponent(el.dataset.q || "")); },
+    nav: function (el) {
+      var id = Number(el.dataset.id || 0);
+      var phase = el.dataset.phase || "";
+      var fallback = function () {
+        var o = orderById(id) || (S.driver && S.driver.current) || {};
+        window.Maximus.openLink(navRoute(o, phase || "to_pickup"));
+      };
+      if (!id) { fallback(); return; }
+      // Ссылку строит сервер: там же вся логика промежуточных точек.
+      api("/api/act", { op: "order.nav", id: id, phase: phase })
+        .then(function (res) {
+          var url = (res && res.url) || "";
+          if (url) window.Maximus.openLink(url);
+          else fallback();
+        })
+        .catch(function () { fallback(); });
+    },
     "a-open": function (el) { picked = el.dataset.id; go("a-driver"); },
     "a-open-pass": function (el) { picked = el.dataset.id; go("a-passenger"); },
     "edit-person": function (el) {

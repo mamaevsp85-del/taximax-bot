@@ -327,6 +327,12 @@ h2:first-child { margin-top: 4px; }
   font-size: 12px;
 }
 
+.chips button.on {
+  background: #facc15;
+  border-color: #facc15;
+  color: #111827;
+}
+
 /* =========================================================
    ПЛИТКИ МЕНЮ — главные кнопки
    ========================================================= */
@@ -1181,56 +1187,47 @@ select:focus {
 .notify-banner span { flex: 1; }
 
 /* =========================================================
-   Одна длинная кнопка «Сегодня» на главной водителя
-   (заменила две отдельные колонки)
+   Одна длинная колонка «Сегодня» внутри блока статуса водителя
+   (заменила две колонки «Сегодня» и «Заявок»)
    ========================================================= */
 .today-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  align-items: baseline;
+  gap: 10px;
   width: 100%;
   margin-top: 12px;
-  padding: 16px 18px;
+  padding: 14px 16px;
   border: 0;
-  border-radius: 18px;
+  border-radius: 16px;
   background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
   color: #ffffff;
   font: inherit;
   text-align: left;
   cursor: pointer;
-  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.24);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.22);
 }
 
 .today-row:active { filter: brightness(0.94); }
 
-.today-left,
-.today-right {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.today-label {
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.72);
+  font-weight: 600;
 }
-
-.today-left .muted,
-.today-right .muted {
-  color: rgba(255, 255, 255, 0.7);
-  font-size: 12px;
-}
-
-.today-right { align-items: flex-end; }
 
 .today-sum {
-  font-size: 26px;
+  font-size: 24px;
   font-weight: 800;
   line-height: 1.05;
   font-variant-numeric: tabular-nums;
 }
 
 .today-count {
-  font-size: 22px;
-  font-weight: 800;
+  margin-left: auto;
+  font-size: 12.5px;
+  font-weight: 700;
   color: #facc15;
-  line-height: 1.1;
+  white-space: nowrap;
 }
 
 /* =========================================================

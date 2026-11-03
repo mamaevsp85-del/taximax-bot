@@ -10,6 +10,7 @@ import logging
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from config import settings
 from core import storage
@@ -621,14 +622,20 @@ def driver_main_header(user_id: int) -> str:
     )
 
 
-def generate_navigation_url(order: Dict[str, Any], phase: str = "to_pickup",
-                            include_waypoints: bool = True) -> str:
-    """URL Яндекс.Карт для навигации: подача -> остановки -> назначение.
+def generate_navigation_url(order: Dict[str, Any], phase: str = "in_trip",
+                            include_waypoints: bool = True,
+                            start: Optional[Tuple[float, float]] = None) -> str:
+    """URL Яндекс.Карт с ПОЛНЫМ маршрутом: подача → остановки → назначение.
+
+    phase:
+      "to_pickup" — едем к пассажиру: [текущая точка водителя] → подача;
+      "in_trip"   — везём пассажира: подача → промежуточные точки → назначение.
 
     ВАЖНО: промежуточные точки хранятся как {"text", "lat", "lon"}
     (геокодер кладёт именно lat/lon). Раньше проверялись только ключи
     latitude/longitude, поэтому навигатор вёл сразу из А в Б и пропускал
-    промежуточные адреса. Теперь поддерживаются оба формата.
+    промежуточные адреса. Теперь поддерживаются оба формата, а в пути
+    остановки ВСЕГДА попадают в маршрут.
     """
     def _point(raw: Any) -> Optional[str]:
         if not isinstance(raw, dict):
@@ -645,7 +652,7 @@ def generate_navigation_url(order: Dict[str, Any], phase: str = "to_pickup",
         return f"{lat},{lon}"
 
     coords: List[str] = []
-    if phase == "to_pickup":
+    if phase in ("in_trip", "to_destination", "trip"):
         first = _point(order.get("pickup_coords"))
         if first:
             coords.append(first)
@@ -658,9 +665,14 @@ def generate_navigation_url(order: Dict[str, Any], phase: str = "to_pickup",
         if last:
             coords.append(last)
     else:
-        end = _point(order.get("destination_coords")) or _point(order.get("pickup_coords"))
-        if end:
-            coords.append(end)
+        if start:
+            try:
+                coords.append(f"{float(start[0])},{float(start[1])}")
+            except (TypeError, ValueError, IndexError):
+                pass
+        first = _point(order.get("pickup_coords"))
+        if first:
+            coords.append(first)
 
     # Убираем дубли подряд: Яндекс.Карты на них ругаются
     deduped: List[str] = []
@@ -668,12 +680,71 @@ def generate_navigation_url(order: Dict[str, Any], phase: str = "to_pickup",
         if not deduped or deduped[-1] != c:
             deduped.append(c)
 
-    if not deduped:
-        return "https://yandex.ru/maps"
+    if len(deduped) >= 2:
+        return (f"https://yandex.ru/maps/?rtt=auto&rtext={'~'.join(deduped)}"
+                f"&rview=0&mode=driving")
     if len(deduped) == 1:
         return f"https://yandex.ru/maps/?pt={deduped[0]}&z=17&mode=search"
-    return (f"https://yandex.ru/maps/?rtt=auto&rtext={'~'.join(deduped)}"
-            f"&rview=0&mode=driving")
+
+    # Координат нет — ищем по адресу, чтобы кнопка всё равно работала.
+    fallback = ""
+    if phase in ("in_trip", "to_destination", "trip"):
+        fallback = str(order.get("destination") or order.get("dropoff_address") or "").strip()
+    fallback = fallback or str(order.get("pickup") or order.get("pickup_address") or "").strip()
+    if fallback:
+        return "https://yandex.ru/maps/?text=" + quote(fallback)
+    return "https://yandex.ru/maps"
+
+
+def generate_google_navigation_url(order: Dict[str, Any], phase: str = "in_trip",
+                                   start: Optional[Tuple[float, float]] = None) -> str:
+    """Google Maps-маршрут с теми же точками (подача → остановки → назначение)."""
+    def _pt(raw: Any) -> Optional[str]:
+        if not isinstance(raw, dict):
+            return None
+        lat = raw.get("lat", raw.get("latitude"))
+        lon = raw.get("lon", raw.get("longitude"))
+        try:
+            lat, lon = float(lat), float(lon)
+        except (TypeError, ValueError):
+            return None
+        if lat == 0 and lon == 0:
+            return None
+        return f"{lat},{lon}"
+
+    points: List[str] = []
+    if start and phase == "to_pickup":
+        try:
+            points.append(f"{float(start[0])},{float(start[1])}")
+        except (TypeError, ValueError, IndexError):
+            pass
+    if phase in ("in_trip", "to_destination", "trip"):
+        pickup = _pt(order.get("pickup_coords"))
+        if pickup:
+            points.append(pickup)
+        for wp in order.get("waypoints") or []:
+            p = _pt(wp)
+            if p:
+                points.append(p)
+        dest = _pt(order.get("destination_coords"))
+        if dest:
+            points.append(dest)
+    else:
+        pickup = _pt(order.get("pickup_coords"))
+        if pickup:
+            points.append(pickup)
+
+    deduped: List[str] = []
+    for p in points:
+        if not deduped or deduped[-1] != p:
+            deduped.append(p)
+    if not deduped:
+        text = (order.get("destination") if phase != "to_pickup" else order.get("pickup")) or ""
+        text = str(text).strip()
+        if text:
+            return "https://www.google.com/maps/search/?api=1&query=" + quote(text)
+        return "https://www.google.com/maps"
+    return "https://www.google.com/maps/dir/" + "/".join(deduped)
 
 
 def calculate_haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

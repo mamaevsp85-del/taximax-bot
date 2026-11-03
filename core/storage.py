@@ -522,6 +522,10 @@ class Storage:
                 "destination": data.get("destination", ""),
                 "pickup_coords": data.get("pickup_coords"),
                 "destination_coords": data.get("destination_coords"),
+                # Промежуточные точки (остановки по пути). Без этого поля
+                # навигатор вёл «из А в Б», а наценка за остановки терялась.
+                "waypoints": list(data.get("waypoints") or []),
+                "entrance": str(data.get("entrance") or "").strip(),
                 "price": data.get("price", 0),
                 "base_price": data.get("base_price") or data.get("price", 0),
                 "distance": data.get("distance", 0),

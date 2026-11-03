@@ -39,6 +39,8 @@ from core.driver_support import (  # noqa: E402
     calculate_waiting_cost,
     get_waiting_info,
     get_waiting_settings,
+    generate_navigation_url,
+    generate_google_navigation_url,
 )
 from core import geocoder  # noqa: E402
 import httpx  # noqa: E402
@@ -1235,6 +1237,54 @@ def act(uid: int, body: dict) -> dict:
             if price < 50:
                 raise ValueError("Сумма слишком маленькая")
         return {"ok": True, "order": create_order(uid, draft, price)}
+    if op == "order.nav":
+        # Навигация: строим маршрут со ВСЕМИ промежуточными точками
+        # (подача → остановки → назначение), а не просто «А → Б».
+        order = S.get_order(int(body.get("id") or 0))
+        if not order or uid not in (order.get("passenger_id"), order.get("driver_id")):
+            raise ValueError("Нет доступа к заказу")
+        phase = str(body.get("phase") or "").strip()
+        if phase not in ("to_pickup", "in_trip"):
+            phase = ("in_trip" if order.get("status") in
+                     ("in_progress", "completed") else "to_pickup")
+        start = None
+        if uid == order.get("driver_id"):
+            loc = (S.get_user(uid) or {}).get("last_location") or {}
+            if isinstance(loc, dict):
+                try:
+                    start = (float(loc["lat"]), float(loc["lon"]))
+                except (KeyError, TypeError, ValueError):
+                    start = None
+        url = generate_navigation_url(order, phase=phase, start=start)
+        google = generate_google_navigation_url(order, phase=phase, start=start)
+        stops = [str(w.get("text") or w.get("address") or "")
+                 for w in (order.get("waypoints") or []) if isinstance(w, dict)]
+        return {"ok": True, "url": url, "google": google, "phase": phase,
+                "stops": [s for s in stops if s]}
+    if op == "order.nav":
+        # Ссылка навигатора со ВСЕМИ точками маршрута:
+        # к подаче — [машина] → подача; в пути — подача → остановки → назначение.
+        order = S.get_order(int(body.get("id") or 0))
+        if not order or uid not in (order.get("passenger_id"), order.get("driver_id")):
+            raise ValueError("Нет доступа к заказу")
+        phase = str(body.get("phase") or "").strip()
+        if not phase:
+            phase = ("in_trip" if order.get("status") == "in_progress"
+                     else "to_pickup")
+        start = None
+        if uid == order.get("driver_id"):
+            loc = (S.get_user(uid) or {}).get("last_location") or {}
+            if isinstance(loc, dict):
+                try:
+                    start = (float(loc["lat"]), float(loc["lon"]))
+                except (KeyError, TypeError, ValueError):
+                    start = None
+        return {
+            "ok": True,
+            "phase": phase,
+            "url": generate_navigation_url(order, phase=phase, start=start),
+            "google": generate_google_navigation_url(order, phase=phase, start=start),
+        }
     if op == "order.route":
         order = S.get_order(int(body.get("id") or 0))
         if not order or uid not in (order.get("passenger_id"), order.get("driver_id")):

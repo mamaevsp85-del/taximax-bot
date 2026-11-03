@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import ssl
@@ -39,9 +40,15 @@ SUGGEST_URL = "https://suggest-maps.yandex.ru/v1/suggest"
 # --- Кэши (важно для скорости при 50+ одновременных пассажирах) ---
 # Центр города (lat, lon) — чтобы сортировать подсказки «от родного города».
 _CITY_CENTER: dict = {}
+# Склейка геокодирования центра города (50 пассажиров из одного города —
+# один запрос в Яндекс, а не 50).
+_CITY_INFLIGHT: dict = {}
 # Кэш подсказок: (запрос, город) -> (время, список)
 _SUGGEST_CACHE: dict = {}
 _SUGGEST_TTL = 120.0        # секунд
+# Склейка одновременных одинаковых запросов: 50 пассажиров, печатающих
+# одно и то же, дают ОДИН запрос к Яндексу, а не 50.
+_SUGGEST_INFLIGHT: dict = {}
 # Кэш геокодирования адресов (одинаковые адреса у 50+ пассажиров)
 _GEOCODE_CACHE: dict = {}
 _GEOCODE_TTL = 600.0        # секунд
@@ -112,16 +119,32 @@ async def _fetch_json(url: str, params: dict, attempts: int = 2):
 
 
 async def city_center(city: str) -> Optional[dict]:
-    """Координаты центра города (кэшируются в памяти)."""
+    """Координаты центра города (кэшируются; параллельные запросы склеиваются)."""
     key = (city or "").strip().lower()
     if not key:
         return None
     if key in _CITY_CENTER:
         return _CITY_CENTER[key]
-    coords, _ = await geocode_address(f"{city}, Россия")
-    if coords:
-        _CITY_CENTER[key] = coords
-    return coords
+    running = _CITY_INFLIGHT.get(key)
+    if running is not None and not running.done():
+        try:
+            return await asyncio.shield(running)
+        except Exception:
+            return None
+
+    async def _resolve():
+        coords, _ = await geocode_address(f"{city}, Россия")
+        if coords:
+            _CITY_CENTER[key] = coords
+        return coords
+
+    task = asyncio.ensure_future(_resolve())
+    _CITY_INFLIGHT[key] = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if _CITY_INFLIGHT.get(key) is task:
+            _CITY_INFLIGHT.pop(key, None)
 
 
 def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -377,12 +400,15 @@ async def calculate_distance_and_time(lat1, lon1, lat2, lon2,
 async def suggest_address(query: str, city: str = "", limit: int = 8,
                           near_lat: Optional[float] = None,
                           near_lon: Optional[float] = None) -> list:
-    """Подсказки адреса через Yandex Suggest (быстро, с кэшем).
+    """Подсказки адреса через Yandex Suggest (быстро, с кэшем и склейкой).
 
-    Сортировка: ближайшие к «родному городу» (или к переданной точке) —
-    сверху. Если пассажир из Черногорска вводит «Мира 1», первым будет
-    «Мира 1, Черногорск», затем ближайшие населённые пункты по возрастанию
-    расстояния.
+    Порядок: сначала адреса родного города (по возрастанию расстояния),
+    затем ближайшие населённые пункты — тоже по возрастанию расстояния.
+    Именно так пассажир из Черногорска, вводя «Мира 1», видит первым
+    «Мира 1, Черногорск», а под ним — ближайшие города.
+
+    Скорость: кэш на 2 минуты + «склейка» одинаковых одновременных запросов
+    (50 пассажиров, печатающих одно и то же, дают ОДИН запрос к Яндексу).
 
     Возвращает: [{"title", "subtitle", "address", "kind", "distance_km"}]
     """
@@ -391,17 +417,46 @@ async def suggest_address(query: str, city: str = "", limit: int = 8,
         return []
 
     city_part = (city or "").strip()
-    # Кэш: одинаковые запросы от 50 пассажиров не бьют в API по кругу.
-    cache_key = (text.lower(), city_part.lower(), int(limit))
+    try:
+        limit_i = max(1, min(int(limit or 8), 20))
+    except (TypeError, ValueError):
+        limit_i = 8
+    cache_key = (text.lower(), city_part.lower(), limit_i)
     cached = _SUGGEST_CACHE.get(cache_key)
     if cached and (time.time() - cached[0]) < _SUGGEST_TTL:
         return cached[1]
 
-    # Центр «родного города»: по нему Яндекс сам считает расстояние до каждой
-    # подсказки (поле distance.value, метры) — сортируем по возрастанию,
-    # поэтому сверху оказываются ближайшие адреса.
+    # Склейка: если такой запрос уже выполняется — ждём его, а не дублируем.
+    running = _SUGGEST_INFLIGHT.get(cache_key)
+    if running is not None and not running.done():
+        try:
+            return await asyncio.shield(running)
+        except Exception:  # предыдущий упал — пробуем сами
+            pass
+
+    task = asyncio.ensure_future(
+        _suggest_fetch(text, city_part, limit_i, near_lat, near_lon, cache_key))
+    _SUGGEST_INFLIGHT[cache_key] = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if _SUGGEST_INFLIGHT.get(cache_key) is task:
+            _SUGGEST_INFLIGHT.pop(cache_key, None)
+
+
+async def _suggest_fetch(text: str, city_part: str, limit: int,
+                         near_lat: Optional[float],
+                         near_lon: Optional[float],
+                         cache_key: tuple) -> list:
+    """Один запрос в Яндекс Suggest + разбор и сортировка по расстоянию."""
+    # Точка отсчёта: координаты пассажира, а если их нет — центр родного города.
     base = None
-    if city_part:
+    if near_lat is not None and near_lon is not None:
+        try:
+            base = {"lat": float(near_lat), "lon": float(near_lon)}
+        except (TypeError, ValueError):
+            base = None
+    if base is None and city_part:
         base = await city_center(city_part)
 
     search_text = text
@@ -412,13 +467,14 @@ async def suggest_address(query: str, city: str = "", limit: int = 8,
         "text": search_text,
         "apikey": settings.yandex_api_key,
         "lang": "ru_RU",
-        "results": str(max(4, min(limit * 3, 20))),
+        "results": str(max(10, min(limit * 4, 20))),
         "print_address": "1",
         "types": "biz,geo",
     }
     if base:
         params["ll"] = f"{base['lon']},{base['lat']}"
-        params["spn"] = "1.0,1.0"
+        # Большой «прицел»: хотим видеть не только свой город, но и соседние.
+        params["spn"] = "1.5,1.5"
 
     try:
         data = await _fetch_json(SUGGEST_URL, params)
@@ -432,7 +488,8 @@ async def suggest_address(query: str, city: str = "", limit: int = 8,
         title = ((item.get("title") or {}).get("text") or "").strip()
         subtitle = ((item.get("subtitle") or {}).get("text") or "").strip()
         addr_obj = item.get("address") or {}
-        address = (addr_obj.get("formatted_address") or "").strip() if isinstance(addr_obj, dict) else ""
+        address = (addr_obj.get("formatted_address") or "").strip() \
+            if isinstance(addr_obj, dict) else ""
         tags = item.get("tags") or []
         if not title:
             continue
@@ -460,8 +517,8 @@ async def suggest_address(query: str, city: str = "", limit: int = 8,
         })
 
     def sort_key(row):
-        # 1) свой город — выше; 2) ближе к центру города — выше;
-        # 3) без данных о расстоянии — в конце.
+        # 1) свой город — всегда выше; 2) по возрастанию расстояния;
+        # 3) без расстояния — в конце.
         return (
             0 if row.get("in_city") else 1,
             0 if row.get("distance_km") is not None else 1,
@@ -469,9 +526,9 @@ async def suggest_address(query: str, city: str = "", limit: int = 8,
         )
 
     collected.sort(key=sort_key)
-    # Если в своём городе ничего не нашли — отдаём всё (межгород/другой город)
-    results = [r for r in collected if r.get("in_city")] or collected
-    results = results[:limit]
+    # Чужие города НЕ выбрасываем: они нужны как «ближайшие населённые пункты»,
+    # но идут строго после адресов родного города.
+    results = collected[:limit]
     for r in results:
         r.pop("in_city", None)
     _SUGGEST_CACHE[cache_key] = (time.time(), results)

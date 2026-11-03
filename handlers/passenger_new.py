@@ -41,6 +41,12 @@ from ui.reply import Reply, sanitize_input
 logger = logging.getLogger(__name__)
 S = storage.storage
 
+# Готовые названия для избранных маршрутов (те же, что в Mini-App).
+FAVORITE_PRESETS = [
+    "🏠 Домой", "💼 На работу", "🏫 В школу",
+    "🏋️ Тренировка", "🛒 Магазин", "🎓 Учёба",
+]
+
 
 def _menu(client, user_id):
     """Экран меню: переписывает сообщение, на котором нажали кнопку."""
@@ -1225,37 +1231,111 @@ def register_passenger(router: Router) -> None:
 
     router.on_callback("passenger:favorite_del:")(favorite_delete)
 
-    # --- добавить заказ в избранное ---
-    async def favorite_add(client, user_id, update, ctx):
-        reply = _menu(client, user_id)
-        try:
-            order_id = int(update.callback.payload.split(":")[-1])
-        except (AttributeError, ValueError):
-            await reply.send("❌ Ошибка.", keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
-            return
-        order = S.get_order(order_id)
+    # --- добавить заказ в избранное: сначала спрашиваем название ---
+    async def _save_favorite(client, user_id, order_id, label):
+        """Сохраняет маршрут с названием и показывает подтверждение."""
+        order = S.get_order(int(order_id or 0))
         if not order or order.get("passenger_id") != user_id:
-            await reply.send("❌ Заказ не найден.",
-                             keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            await _menu(client, user_id).send(
+                "❌ Заказ не найден.",
+                keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
             return
-        label = f"{order.get('pickup', '')} → {order.get('destination', '')}"
-        S.add_favorite(user_id, order_id, label=label)
+        default_label = f"{order.get('pickup', '')} → {order.get('destination', '')}"
+        label = (label or "").strip()[:80] or default_label[:80]
+        S.add_favorite(user_id, order["id"], label=label)
+        head = f"⭐ Сохранено в избранное: <b>{label}</b>"
         if order.get("status") == "completed":
-            # Детали поездки остаются на экране — пассажир видит,
-            # что именно сохранено в избранное.
-            await reply.send(
-                build_order_receipt(order) + "\n\n⭐ Маршрут сохранён в избранное.",
+            await _menu(client, user_id).send(
+                build_order_receipt(order) + "\n\n" + head,
                 keyboard=[[callback_button("⭐ Избранное", "passenger:favorites")],
                           [callback_button("↪️ Меню", "passenger:menu")]])
             return
-        await reply.send(
-            f"⭐ Заказ #{order_id} добавлен в избранное.",
+        await _menu(client, user_id).send(
+            f"{head}\nЗаказ #{order['id']} добавлен в избранное.",
             keyboard=[[callback_button("⭐ Избранное", "passenger:favorites")],
                       [callback_button("↪️ Меню", "passenger:menu")]])
+
+    async def _ask_favorite_name(client, user_id, order_id):
+        """Просит название: готовые варианты кнопками или своё текстом."""
+        fsm = get_context(user_id)
+        await fsm.set_state("passenger:fav_name")
+        await fsm.update_data(fav_order_id=int(order_id))
+        rows = [[callback_button(p, f"passenger:fav_name_set:{i}")]
+                for i, p in enumerate(FAVORITE_PRESETS)]
+        rows.append([callback_button("➡️ Без названия",
+                                    "passenger:fav_name_skip")])
+        await _ask(client, user_id).send(
+            "⭐ <b>Как назвать этот маршрут?</b>\n\n"
+            "Выберите готовый вариант или отправьте своё название текстом "
+            "(например, «На дачу»).",
+            keyboard=rows)
+
+    async def favorite_add(client, user_id, update, ctx):
+        try:
+            order_id = int(update.callback.payload.split(":")[-1])
+        except (AttributeError, ValueError):
+            await _menu(client, user_id).send(
+                "❌ Ошибка.",
+                keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            return
+        order = S.get_order(order_id)
+        if not order or order.get("passenger_id") != user_id:
+            await _menu(client, user_id).send(
+                "❌ Заказ не найден.",
+                keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            return
+        await _ask_favorite_name(client, user_id, order_id)
+
+    async def fav_name_set(client, user_id, update, ctx):
+        fsm = get_context(user_id)
+        data = await fsm.get_data()
+        order_id = data.get("fav_order_id")
+        try:
+            idx = int(update.callback.payload.split(":")[-1])
+        except (AttributeError, ValueError):
+            idx = -1
+        await fsm.clear()
+        if not order_id:
+            await _menu(client, user_id).send(
+                "❌ Сессия истекла — нажмите «⭐ В избранное» ещё раз.",
+                keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            return
+        label = FAVORITE_PRESETS[idx] if 0 <= idx < len(FAVORITE_PRESETS) else ""
+        await _save_favorite(client, user_id, order_id, label)
+
+    async def fav_name_skip(client, user_id, update, ctx):
+        fsm = get_context(user_id)
+        data = await fsm.get_data()
+        order_id = data.get("fav_order_id")
+        await fsm.clear()
+        if not order_id:
+            await _menu(client, user_id).send(
+                "❌ Сессия истекла — нажмите «⭐ В избранное» ещё раз.",
+                keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            return
+        await _save_favorite(client, user_id, order_id, "")
+
+    async def fav_name(client, user_id, update, ctx):
+        fsm = get_context(user_id)
+        data = await fsm.get_data()
+        order_id = data.get("fav_order_id")
+        text = sanitize_input(update.message.text) if update.message else ""
+        await fsm.clear()
+        if not order_id:
+            await _menu(client, user_id).send(
+                "❌ Сессия истекла — нажмите «⭐ В избранное» ещё раз.",
+                keyboard=[[callback_button("↪️ Меню", "passenger:menu")]])
+            return
+        if text.strip().lower() in ("-", "нет", "без названия", "пропустить"):
+            text = ""
+        await _save_favorite(client, user_id, order_id, text)
 
     router.on_callback("passenger:favorite_add:")(favorite_add)
     # Алиас для кнопки из уведомления о завершении поездки
     router.on_callback("passenger:fav_add:")(favorite_add)
+    router.on_callback("passenger:fav_name_set:")(fav_name_set)
+    router.on_callback("passenger:fav_name_skip")(fav_name_skip)
+    router.on_state("passenger:fav_name")(fav_name)
 
     async def _recalc_favorite_route(route: dict) -> dict:
         """Всегда пересчитывает цену избранного по актуальному тарифу."""
