@@ -43,6 +43,7 @@ from core.driver_support import (  # noqa: E402
     generate_google_navigation_url,
 )
 from core import geocoder  # noqa: E402
+from core.areas import group_orders_by_area  # noqa: E402
 import httpx  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -168,6 +169,24 @@ def brief_order(o: dict) -> dict:
         return {}
     passenger = S.get_user(o.get("passenger_id")) or {}
     driver = S.get_user(o.get("driver_id")) or {} if o.get("driver_id") else {}
+    try:
+        final_price = float(o.get("final_price") or o.get("price") or 0)
+    except (TypeError, ValueError):
+        final_price = 0.0
+    try:
+        waiting_cost = float(o.get("waiting_cost") or 0)
+    except (TypeError, ValueError):
+        waiting_cost = 0.0
+    commission = S.get_commission_config()
+    commission_on = bool(commission.get("enabled")) and commission.get("mode") == "percent"
+    percent = float(commission.get("percent") or 0) if commission_on else 0.0
+    earning = o.get("driver_earning")
+    if earning is None or earning == "":
+        earning = final_price * (100 - percent) / 100.0 if commission_on else final_price
+    try:
+        earning = float(earning)
+    except (TypeError, ValueError):
+        earning = final_price
     return {
         "id": o.get("id"),
         "passenger_id": o.get("passenger_id"),
@@ -179,6 +198,10 @@ def brief_order(o: dict) -> dict:
         "price": o.get("final_price") or o.get("price") or 0,
         "base_price": o.get("base_price") or o.get("price") or 0,
         "final_price": o.get("final_price") or o.get("price") or 0,
+        "total_price": round(final_price + waiting_cost, 2),
+        "commission_percent": percent,
+        "commission_amount": round((final_price + waiting_cost) - earning, 2),
+        "driver_earning": round(earning, 2),
         "distance": o.get("distance") or 0,
         "time_minutes": o.get("time_minutes") or 0,
         "status": o.get("status"),
@@ -190,8 +213,12 @@ def brief_order(o: dict) -> dict:
         "rating": o.get("passenger_rating"),
         "complaint": o.get("complaint") or "",
         "waypoints": o.get("waypoints") or [],
-        "passenger_name": passenger.get("name") or "",
-        "passenger_phone": passenger.get("phone") or "",
+        # Водителю телефон пассажира не показываем: связь — через «Написать»
+        # и «Позвонить через MAX». Открыт только во время активного рейса.
+        "passenger_name": passenger.get("name") or passenger.get("first_name") or "",
+        "passenger_phone": (passenger.get("phone") or "")
+        if o.get("status") in ("accepted", "driver_arrived", "in_progress") else "",
+        "can_write": bool(o.get("passenger_id")),
         "driver_name": driver.get("driver_name") or driver.get("name") or "",
         "driver_phone": driver.get("phone") or "",
         "car_model": driver.get("car_model") or "",
@@ -364,14 +391,18 @@ def passenger_block(uid: int) -> dict:
 
 
 def driver_block(uid: int) -> dict:
-    raw = get_available_orders_for_driver(uid) or []
+    ref = S.get_driver_reference_point(uid) or {}
+    ref_lat, ref_lon = ref.get("lat"), ref.get("lon")
+    raw = get_available_orders_for_driver(uid, ref_lat, ref_lon) or []
     available = []
     for item in raw:
         oid = item.get("id") if isinstance(item, dict) else item
         order = item if isinstance(item, dict) and item.get("pickup") else S.get_order(oid)
         if order:
             available.append(brief_order(order))
-    current = S.get_driver_active_order(uid)
+    active = S.get_driver_active_orders(uid)
+    current = active[0] if active else {}
+    following = active[1] if len(active) > 1 else {}
     history = [brief_order(o) for o in S.get_driver_history(uid, 30)]
     today_orders = [brief_order(o) for o in S.get_driver_history(uid, 40, period="today")]
     tariffs = S.get_access_tariffs()
@@ -397,6 +428,9 @@ def driver_block(uid: int) -> dict:
         "available_count": len(available),
         "pending_waiting": pending_waiting,
         "current": brief_order(current) if current else None,
+        "next": brief_order(following) if following else None,
+        "reference": ref,
+        "groups": group_orders_by_area(available, ref_lat, ref_lon),
         "history": history,
         "today_orders": today_orders,
         "today": today_stats,
@@ -931,13 +965,20 @@ def accept(uid: int, oid: int) -> dict:
         raise ValueError("Сначала выйдите на линию")
     if S.commission_requires_access() and not S.has_active_access(uid):
         raise ValueError("Нет активной смены")
-    if S.is_driver_blocked(uid) or is_driver_busy(uid):
+    if S.is_driver_blocked(uid):
         raise ValueError("Сейчас нельзя взять заказ")
+    if is_driver_busy(uid):
+        active = S.get_driver_active_orders(uid)
+        if len(active) >= 2:
+            raise ValueError("У вас уже два заказа — завершите текущий")
+        raise ValueError("Сначала нажмите «Начать движение» по текущему заказу")
     order = S.get_order(oid)
     if not order or order.get("status") != "pending":
         raise ValueError("Заказ уже занят или не найден")
     S.update_order(oid, driver_id=uid, status="accepted", accepted_at=datetime.now().isoformat())
-    S.update_user(uid, driver_current_order_id=oid)
+    # driver_current_order_id — это ТЕКУЩИЙ заказ (первый в очереди).
+    active = S.get_driver_active_orders(uid)
+    S.update_user(uid, driver_current_order_id=active[0].get("id") if active else oid)
     add_order_to_driver_queue(uid, oid)
     return brief_order(S.get_order(oid))
 
@@ -953,8 +994,22 @@ def own_order(uid: int, oid: int, as_driver=False) -> dict:
     return order
 
 
-def complete(uid: int, oid: int, lat: float | None = None, lon: float | None = None) -> dict:
+def own_current_order(uid: int, oid: int) -> dict:
+    """Заказ водителя, которым СЕЙЧАС можно управлять.
+
+    Второй (следующий) принятый заказ управлению не подлежит,
+    пока не завершён текущий.
+    """
     order = own_order(uid, oid, as_driver=True)
+    active = S.get_driver_active_orders(uid)
+    if len(active) > 1 and active[0].get("id") != int(oid):
+        raise ValueError("Сначала завершите текущий заказ — этот в очереди следующим")
+    return order
+
+
+def complete(uid: int, oid: int, lat: float | None = None, lon: float | None = None) -> dict:
+    # Только ТЕКУЩИМ заказом можно управлять: следующий ждёт своей очереди.
+    order = own_current_order(uid, oid)
     if order.get("status") not in ("in_progress", "driver_arrived", "accepted"):
         raise ValueError("Завершить можно поездку в пути")
 
@@ -1578,7 +1633,7 @@ def act(uid: int, body: dict) -> dict:
         return {"ok": True, "order": result}
 
     if op == "driver.arrived":
-        order = own_order(uid, int(body["id"]), as_driver=True)
+        order = own_current_order(uid, int(body["id"]))
         if order.get("status") != "accepted":
             raise ValueError("Сначала заказ должен быть принят")
         now = datetime.now().isoformat()
@@ -1603,7 +1658,7 @@ def act(uid: int, body: dict) -> dict:
         # Кнопка «Ожидание» в пути: только старт/стоп таймера.
         # СТАТУС ЗАКАЗА НЕ МЕНЯЕТСЯ НИКОГДА — иначе в интерфейсе
         # «Завершить поездку» превращается в «Начать движение».
-        order = own_order(uid, int(body["id"]), as_driver=True)
+        order = own_current_order(uid, int(body["id"]))
         status_before = order.get("status")
         if status_before not in ("in_progress", "driver_arrived"):
             raise ValueError("Ожидание доступно только во время поездки")
@@ -1624,7 +1679,7 @@ def act(uid: int, body: dict) -> dict:
                 "order": brief_order(fresh)}
 
     if op == "driver.start":
-        order = own_order(uid, int(body["id"]), as_driver=True)
+        order = own_current_order(uid, int(body["id"]))
         # Идемпотентность: если поездка уже идёт — НЕ трогаем ожидание
         # и НЕ сбрасываем статус. Иначе повторное нажатие «Начать движение»
         # (например, со старой кэшированной версией интерфейса) останавливает
@@ -1667,16 +1722,25 @@ def act(uid: int, body: dict) -> dict:
             raise ValueError("Укажите дату YYYY-MM-DD")
         orders = S.get_driver_history(uid, 1000, period=f"date:{date}")
         total = 0.0
+        earning_total = 0.0
         count = len(orders)
         for o in orders:
             try:
-                total += float(o.get("price") or 0) + float(o.get("waiting_cost") or 0)
+                total += float(o.get("final_price") or o.get("price") or 0) + float(o.get("waiting_cost") or 0)
             except (TypeError, ValueError):
                 pass
-        return {"ok": True, "date": date, "sum": round(total, 2), "count": count,
+            earned = o.get("driver_earning")
+            if earned in (None, ""):
+                earned = float(o.get("final_price") or o.get("price") or 0) + float(o.get("waiting_cost") or 0)
+            try:
+                earning_total += float(earned)
+            except (TypeError, ValueError):
+                pass
+        return {"ok": True, "date": date, "sum": round(total, 2),
+                "earning": round(earning_total, 2), "count": count,
                 "orders": [brief_order(o) for o in orders]}
     if op == "driver.cancel":
-        order = own_order(uid, int(body["id"]), as_driver=True)
+        order = own_current_order(uid, int(body["id"]))
         if order.get("status") not in ACTIVE:
             raise ValueError("Рейс уже закрыт")
         stop_waiting(order["id"])

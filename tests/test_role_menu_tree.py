@@ -385,8 +385,8 @@ class RoleMenuTreeTests(unittest.IsolatedAsyncioTestCase):
         seen, errors = await self._walk(uid, ["driver:menu"])
         self.assertEqual(errors, [])
         blob = self._joined_buttons()
-        for label in ("Текущие заказы", "Список заказов", "Обновить гео",
-                      "Мой профиль", "Сменить роль", "Выйти на линию"):
+        for label in ("Текущие заказы", "Список заказов", "Профиль",
+                      "Сменить роль", "Выйти на линию"):
             self.assertIn(label, blob)
         self.assertIn("driver:profile", seen)
         self.assertIn("driver:orders_available", seen)

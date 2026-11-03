@@ -85,11 +85,26 @@ def get_driver_current_order(driver_id: int) -> Optional[int]:
 
 
 def is_driver_busy(driver_id: int) -> bool:
-    cur = get_driver_current_order(driver_id)
-    if not cur:
+    """Занят ли водитель так, что брать ЕЩЁ один заказ нельзя.
+
+    Допускается максимум два активных заказа: текущий и следующий.
+    Следующий можно взять только когда по текущему уже начата
+    поездка (in_progress) — иначе водитель ещё едет на подачу.
+    """
+    active = S.get_driver_active_orders(driver_id)
+    if not active:
         return False
-    order = S.get_order(cur)
-    return bool(order and order.get("status") in ("accepted", "driver_arrived", "in_progress"))
+    if len(active) >= 2:
+        return True
+    top = active[0]
+    if top.get("status") == "in_progress":
+        return False
+    return True
+
+
+def can_take_more_orders(driver_id: int) -> bool:
+    """Можно ли водителю взять ещё один заказ (максимум 2 активных)."""
+    return not is_driver_busy(driver_id)
 
 
 def remove_order_from_driver_queue(driver_id: int, order_id: int) -> None:
@@ -379,6 +394,11 @@ def balance_hidden() -> bool:
 
 
 def main_menu_rows(user_id: int) -> List[List[Dict[str, Any]]]:
+    """Главное меню водителя: статус -> заработок -> список заказов.
+
+    Все подменю (машина, документы, статистика, история, гео, помощь)
+    перенесены в «Профиль», чтобы главный экран был коротким.
+    """
     today = S.get_driver_stats(user_id, "today")
     count = int(today.get("count") or 0)
     earnings = float(today.get("earnings") or 0)
@@ -386,13 +406,17 @@ def main_menu_rows(user_id: int) -> List[List[Dict[str, Any]]]:
         earn_label = f"{int(earnings)}" if float(earnings).is_integer() else f"{earnings:.0f}"
     except (TypeError, ValueError):
         earn_label = "0"
+    waiting = 0
+    try:
+        waiting = len(S.get_pending_orders())
+    except Exception:
+        waiting = 0
     return [
         _row(_status_menu_label(user_id), "driver:work_status"),
         _row(f"💵 Сегодня: {earn_label} ₽ · заявок {count}", "driver:today"),
         _row("🚕 Текущие заказы", "driver:current_order"),
-        _row("📋 Список заказов", "driver:orders_available"),
-        _row("📍 Обновить гео", "driver:location"),
-        _row("👤 Мой профиль", "driver:profile"),
+        _row(f"📋 Список заказов (ждут: {waiting})", "driver:orders_available"),
+        _row("👤 Профиль", "driver:profile"),
         _row("🔄 Сменить роль", "menu:roles"),
     ]
 
@@ -458,6 +482,7 @@ def profile_rows() -> List[List[Dict[str, Any]]]:
         _row("📱 Изменить телефон", "driver:profile:edit_phone"),
         _row("🚙 Данные автомобиля", "driver:profile:edit_car"),
         _row("📎 Загрузить документы", "driver:docs"),
+        _row("📍 Обновить гео", "driver:location"),
         _row("📊 Статистика", "driver:stats"),
         _row("📜 История заказов", "driver:orders_history"),
     ]

@@ -86,7 +86,6 @@ class RegressionTests(unittest.IsolatedAsyncioTestCase):
             "driver:today",
             "driver:current_order",
             "driver:orders_available",
-            "driver:location",
             "driver:profile",
             "menu:roles",
         ])

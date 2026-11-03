@@ -31,6 +31,7 @@ from core.driver_support import (
 from core.fsm import get_context
 from core.router import Router
 from core.tariff_manager import calculate_trip_price
+from core.areas import group_orders_by_area
 from core.geocoder import get_address_by_coordinates, calculate_distance_and_time
 from max_api.keyboards import callback_button, link_button, request_geo_location_button
 from ui.reply import Reply, sanitize_input, get_menu_mid, remember_menu_mid
@@ -1037,7 +1038,8 @@ async def process_stats_custom(client, user_id, update, ctx):
 
 # ==================== ДОСТУПНЫЕ ЗАКАЗЫ ====================
 async def driver_orders_available(client, user_id, update, ctx):
-    """Список доступных заказов для водителя."""
+    """Список доступных заказов для водителя: ближайшие первыми,
+    с разбивкой по районам города и межгороду."""
     await _answer_cb(client, update)
     ver = S.get_driver_verification_status(user_id)
     if ver != "approved":
@@ -1060,9 +1062,15 @@ async def driver_orders_available(client, user_id, update, ctx):
         return
     if is_driver_busy(user_id):
         await _Reply(client, user_id).send(
-            "🚗 У вас уже есть активный заказ.", keyboard=order_management_rows(0, {}))
+            "🚗 У вас уже есть активный заказ.\n\n"
+            "Второй заказ можно взять, когда по текущему вы уже нажали «Начать движение».",
+            keyboard=order_management_rows(0, {}))
         return
-    pending = S.get_pending_orders()
+    # Ближайшие первыми: опорная точка — конечная точка текущей поездки,
+    # иначе точка Б последней завершённой заявки.
+    ref = S.get_driver_reference_point(user_id) or {}
+    pending = get_available_orders_for_driver(
+        user_id, ref.get("lat"), ref.get("lon")) or S.get_pending_orders()
     if not pending:
         await _send_menu(client, user_id,
                          "📋 На данный момент нет доступных заказов.\n\n"
@@ -1070,22 +1078,30 @@ async def driver_orders_available(client, user_id, update, ctx):
                          "Вернитесь в меню и подождите.",
                          back_to_main_rows(), replace_previous=1)
         return
-    rows = [f"📋 <b>Список заказов:</b>\n\n🚕 Ждут водителя сейчас: {waiting_count}\n"]
+    groups = group_orders_by_area(pending, ref.get("lat"), ref.get("lon"))
+    rows = [f"📋 <b>Список заказов:</b>\n\n🚕 Ждут водителя сейчас: {waiting_count}\n"
+            "Сортировка от ближнего к дальнему.\n"]
     kb: List[List[Dict[str, Any]]] = []
-    for o in pending[:10]:
-        oid = o.get("id", 0)
-        pickup = o.get("pickup_address") or o.get("pickup", "—")
-        dest = o.get("dropoff_address") or o.get("destination", "—")
-        price = o.get("price", 0)
-        distance = o.get("distance", "?")
-        time_min = o.get("time_minutes", "?")
-        rows.append(
-            f"📍 {pickup} → {dest}\n"
-            f"💰 {fmt_price(price)} | {distance} км | ⏱ {time_min} мин\n"
-        )
-        kb.append([callback_button(
-            f"✅ {oid} — {pickup} → {dest}",
-            f"driver:select_order:{oid}")])
+    shown = 0
+    for g in groups:
+        if shown >= 10:
+            break
+        rows.append(f"\n<b>{g['title']}</b> · {g['count']}")
+        for o in g["orders"]:
+            if shown >= 10:
+                break
+            oid = o.get("id", 0)
+            pickup = (o.get("pickup") or "—")[:40]
+            dest = (o.get("destination") or "—")[:30]
+            dist = f"{round(float(o.get('distance') or 0), 1)} км"
+            tmin = int(o.get("time_minutes") or 0)
+            price = fmt_price(o.get("price", 0))
+            rows.append(f"#{oid} {pickup} → {dest}\n"
+                        f"   {price} | {dist} | ⏱ {tmin} мин")
+            kb.append([callback_button(
+                f"✅ {oid} — {pickup} → {dest}",
+                f"driver:select_order:{oid}")])
+            shown += 1
     kb.append(_row("↪️ Главное меню", "driver:menu"))
     await _send_menu(client, user_id, "\n".join(rows), kb, replace_previous=1)
     await get_context(user_id).set_state(STATE_ORDER_LIST_VIEW)
@@ -1103,7 +1119,10 @@ async def _accept_order(client, user_id, oid: int) -> None:
         o.get("driver_id") == user_id and o.get("status") in ("accepted", "driver_arrived", "in_progress")
         for o in S.orders.values()
     ):
-        await _Reply(client, user_id).send("🚗 У вас уже есть активный заказ.", keyboard=back_to_main_rows())
+        await _Reply(client, user_id).send(
+            "🚗 У вас уже есть активный заказ.\n\n"
+            "Второй заказ можно взять, когда по текущему вы уже нажали «Начать движение».",
+            keyboard=back_to_main_rows())
         return
     order = S.get_order(oid)
     if not order:
@@ -1116,7 +1135,10 @@ async def _accept_order(client, user_id, oid: int) -> None:
     # Назначаем водителя
     S.update_order(oid, driver_id=user_id, status="accepted",
                    accepted_at=datetime.now().isoformat())
-    S.update_user(user_id, driver_current_order_id=oid)
+    # driver_current_order_id — ТЕКУЩИЙ заказ (первый в очереди):
+    # при втором заказе он не должен перезаписываться.
+    active = S.get_driver_active_orders(user_id)
+    S.update_user(user_id, driver_current_order_id=active[0].get("id") if active else oid)
     add_order_to_driver_queue(user_id, oid)
 
     # Уведомляем пассажира, что к нему назначен водитель
@@ -1175,23 +1197,32 @@ async def driver_accept_order(client, user_id, update, ctx):
 
 # ==================== ТЕКУЩИЙ ЗАКАЗ + ЖИЗНЕННЫЙ ЦИКЛ ====================
 async def driver_current_order(client, user_id, update, ctx):
-    """Текущий активный заказ."""
+    """Текущий заказ (+ следующий в очереди, без управления)."""
     await _answer_cb(client, update)
-    oid = get_driver_current_order(user_id)
-    if not oid:
+    active = S.get_driver_active_orders(user_id)
+    if not active:
         await _send_menu(client, user_id,
                          "📭 Нет активного заказа.\n\n📋 Список заказов →",
                          back_to_main_rows(), replace_previous=1)
         return
-    order = S.get_order(oid)
-    if not order:
-        await _send_menu(client, user_id, "❌ Заказ не найден.",
-                         back_to_main_rows(), replace_previous=1)
-        return
+    order = active[0]
+    next_order = active[1] if len(active) > 1 else {}
     await get_context(user_id).set_state(STATE_ACTIVE_ORDER)
     card_text = _build_active_order_card(order)
+    if next_order:
+        card_text += (
+            "\n\n⏭ <b>Следующий заказ #{}</b>\n"
+            "📍 {} → {}\n"
+            "💰 {}\n\n"
+            "Управление откроется после завершения текущего."
+        ).format(
+            next_order.get("id"),
+            next_order.get("pickup") or "—",
+            next_order.get("destination") or "—",
+            fmt_price(next_order.get("price", 0)),
+        )
     await _send_menu(client, user_id, card_text,
-                     order_management_rows(oid, order), replace_previous=1)
+                     order_management_rows(order.get("id"), order), replace_previous=1)
 
 
 def _order_text(order, show_waiting: bool = True) -> str:

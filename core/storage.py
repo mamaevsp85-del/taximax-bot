@@ -1014,6 +1014,59 @@ class Storage:
                 return o
         return {}
 
+    def get_driver_active_orders(self, driver_id: int) -> List[Dict[str, Any]]:
+        """Все незакрытые заказы водителя: сначала текущий, затем следующий.
+
+        «Текущий» — тот, по которому водитель уже едет (in_progress),
+        иначе самый ранний принятый. «Следующий» — второй принятый заказ,
+        которым до завершения текущего управлять нельзя.
+        """
+        active_statuses = ("accepted", "driver_arrived", "in_progress")
+        rows = [
+            o for o in self.orders.values()
+            if o.get("driver_id") == int(driver_id) and o.get("status") in active_statuses
+        ]
+        if not rows:
+            return []
+
+        def rank(order: dict) -> tuple:
+            status = order.get("status")
+            prio = {"in_progress": 0, "driver_arrived": 1, "accepted": 2}.get(status, 3)
+            return (prio, order.get("accepted_at") or "", order.get("id") or 0)
+
+        rows.sort(key=rank)
+        return rows
+
+    def get_driver_next_order(self, driver_id: int) -> dict:
+        """Второй (следующий) принятый заказ — без права управления."""
+        rows = self.get_driver_active_orders(driver_id)
+        return rows[1] if len(rows) > 1 else {}
+
+    def get_driver_reference_point(self, driver_id: int) -> Dict[str, Any]:
+        """Откуда считать «ближайший заказ» для сортировки списка.
+
+        Приоритет: конечная точка текущей поездки -> точка Б последней
+        завершённой заявки -> последняя известная геопозиция -> город.
+        """
+        for order in self.get_driver_active_orders(driver_id):
+            if order.get("status") != "in_progress":
+                continue
+            point = _point_coords(order.get("destination_coords"))
+            if point:
+                return {"lat": point[0], "lon": point[1], "source": "trip",
+                        "order_id": order.get("id")}
+        last = self.get_driver_history(driver_id, 1)
+        if last:
+            point = _point_coords(last[0].get("destination_coords"))
+            if point:
+                return {"lat": point[0], "lon": point[1], "source": "last_order",
+                        "order_id": last[0].get("id")}
+        user = self.users.get(int(driver_id), {})
+        lat, lon = user.get("last_lat"), user.get("last_lon")
+        if lat is not None and lon is not None:
+            return {"lat": lat, "lon": lon, "source": "location"}
+        return {}
+
 
     def add_notified_driver(self, order_id: int, driver_id: int) -> None:
         with self._lock:
@@ -1609,7 +1662,7 @@ class Storage:
         buckets: Dict[str, Dict[str, Any]] = {}
         day = start
         while day <= now.date():
-            buckets[day.isoformat()] = {"date": day.isoformat(), "sum": 0.0, "count": 0}
+            buckets[day.isoformat()] = {"date": day.isoformat(), "sum": 0.0, "earning": 0.0, "count": 0}
             day += timedelta(days=1)
         for o in self.orders.values():
             if o.get("driver_id") != int(driver_id):
@@ -1631,6 +1684,14 @@ class Storage:
             except (TypeError, ValueError):
                 amount = 0.0
             buckets[key]["sum"] = round(buckets[key]["sum"] + amount, 2)
+            earning = o.get("driver_earning")
+            if earning in (None, ""):
+                earning = amount
+            try:
+                earning = float(earning)
+            except (TypeError, ValueError):
+                earning = amount
+            buckets[key]["earning"] = round(buckets[key]["earning"] + earning, 2)
             buckets[key]["count"] += 1
         return [buckets[k] for k in sorted(buckets)]
 
@@ -2260,6 +2321,22 @@ class Storage:
     # ==================== ЭКЗЕМПЛЯР ====================
 
 
+def _point_coords(point):
+    """(lat, lon) из dict-координат заказа. None, если точки нет."""
+    if not isinstance(point, dict):
+        return None
+    lat = point.get("lat", point.get("latitude"))
+    lon = point.get("lon", point.get("longitude"))
+    try:
+        la = float(lat)
+        lo = float(lon)
+    except (TypeError, ValueError):
+        return None
+    if la == 0 and lo == 0:
+        return None
+    return la, lo
+
+
 def haversine_distance(lat1, lon1, lat2, lon2):
     """Расстояние между двумя точками, км."""
     import math
@@ -2273,21 +2350,32 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 
 
 def get_available_orders_for_driver(driver_id, ref_lat=None, ref_lon=None):
-    """Pending-заказы, ближайшие к точке водителя — первыми."""
+    """Pending-заказы, ближайшие к точке водителя — первыми.
+
+    Опорная точка: конечная точка текущей поездки (если водитель уже
+    поехал), иначе точка Б последней завершённой заявки, иначе
+    последняя геопозиция.
+    """
     driver = storage.get_user(driver_id)
     if not driver:
         return []
     if ref_lat is None or ref_lon is None:
-        ref_lat = driver.get("last_lat")
-        ref_lon = driver.get("last_lon")
+        ref = storage.get_driver_reference_point(driver_id) or {}
+        ref_lat = ref.get("lat")
+        ref_lon = ref.get("lon")
     pending = storage.get_pending_orders()
     if ref_lat is None or ref_lon is None:
         return pending
     ranked = []
     for order in pending:
         coords = order.get("pickup_coords") or {}
-        lat = coords.get("lat")
-        lon = coords.get("lon")
+        lat = coords.get("lat", coords.get("latitude"))
+        lon = coords.get("lon", coords.get("longitude"))
+        try:
+            lat = float(lat)
+            lon = float(lon)
+        except (TypeError, ValueError):
+            continue
         if lat is None or lon is None:
             continue
         ranked.append((haversine_distance(ref_lat, ref_lon, lat, lon), order))

@@ -134,6 +134,7 @@
     if (!Array.isArray(data.passenger.orders)) data.passenger.orders = [];
     if (!Array.isArray(data.passenger.favorites)) data.passenger.favorites = [];
     if (!Array.isArray(data.driver.available)) data.driver.available = [];
+    if (!Array.isArray(data.driver.groups)) data.driver.groups = [];
     if (!Array.isArray(data.driver.history)) data.driver.history = [];
     if (!Array.isArray(data.driver.transactions)) data.driver.transactions = [];
     if (!data.driver.stats) data.driver.stats = {};
@@ -311,6 +312,22 @@
     if (!o) return 0;
     var total = o.final_price;
     return total != null && total !== "" ? total : (o.price || 0);
+  }
+  // Сколько получил водитель с учётом комиссии агрегатора.
+  function orderEarning(o) {
+    if (!o) return 0;
+    if (o.driver_earning != null && o.driver_earning !== "") return Number(o.driver_earning);
+    return Number(orderPrice(o)) || 0;
+  }
+  // Итоги дня: заработок водителя, число заявок, ожидание.
+  function dayTotals(list) {
+    var earning = 0, waiting = 0;
+    for (var i = 0; i < (list || []).length; i++) {
+      earning += orderEarning(list[i]);
+      waiting += Number(list[i].waiting_cost || 0);
+    }
+    return { earning: Math.round(earning * 100) / 100, waiting: waiting,
+             count: (list || []).length };
   }
   function favoriteIndex(orderId) {
     var favs = (S && S.passenger && S.passenger.favorites) || [];
@@ -845,6 +862,16 @@
       var today = (S.driver && S.driver.today) || {};
       var todayCount = today.count || 0;
       var todayEarn = today.earnings || 0;
+      var list = (S.driver && S.driver.available) || [];
+      var waiting = Number((S.driver && S.driver.pending_waiting) || 0);
+      var ref = (S.driver && S.driver.reference) || {};
+      var refText = ref.source === "trip"
+        ? "от конечной точки текущей поездки"
+        : ref.source === "last_order"
+          ? "от точки Б последней заявки"
+          : "от вашей геопозиции";
+      // Главный экран: статус -> заработок -> сразу список заказов.
+      // Все подменю (машина, документы, статистика, история) — в «Профиле».
       return '<div class="card" style="margin-top:0"><div class="row"><div><b>' + esc(u.driver_name || u.name) +
         '</b><div class="muted">' + esc([u.car_model, u.car_number].filter(Boolean).join(" · ")) + "</div></div>" +
         '<span class="badge ' + (u.line === "online" ? "ok" : "off") + '">' + line + "</span></div>" +
@@ -858,12 +885,23 @@
         '<span class="today-count">' + todayCount + " заявок</span>" +
         "</button></div>" +
         (S.driver.current ? orderCard(S.driver.current, "d-open") : "") +
-        group("На линии") +
-        '<div class="grid">' +
-        tile("d-orders", "☰", "Список заказов", "свободные рядом") +
-        tile("d-current", "▶", "Текущий рейс", S.driver.current ? "заказ #" + S.driver.current.id : "нет рейса") +
-        tile("d-profile", "☺", "Профиль", "авто и документы") +
-        "</div>";
+        (S.driver.next ? '<div class="card"><div class="row"><b>Следующий рейс</b>' +
+          '<span class="badge wait">в очереди</span></div>' +
+          '<div class="route" style="margin-top:8px">' + esc(S.driver.next.pickup) +
+          "<small>" + esc(S.driver.next.destination) + "</small></div>" +
+          '<p class="muted">Управление откроется после завершения текущего рейса</p></div>' : "") +
+        '<h2>Заказы рядом' + (waiting ? " · ждут " + waiting : "") + "</h2>" +
+        '<p class="muted" style="margin-top:-6px">Сортировка ' + refText + "</p>" +
+        (u.line !== "online"
+          ? '<p class="list-empty">Выйдите на линию, чтобы видеть и принимать заказы</p>'
+          : (list.length
+            ? list.slice(0, 4).map(function (o) {
+                return '<div class="card">' + orderCard(o, "noop") +
+                  '<button class="btn" data-act="accept" data-id="' + o.id + '">Принять</button></div>';
+              }).join("")
+            : '<p class="list-empty">Свободных заказов нет</p>')) +
+        '<button class="btn ghost" data-act="tab" data-screen="d-orders">Все заказы' +
+        (list.length > 4 ? " · " + list.length : "") + "</button>";
     },
     "d-today": function () {
       var daily = (S.driver && S.driver.daily) || {};
@@ -871,7 +909,8 @@
       var list = daily[periodKey] || [];
       var totalSum = 0, totalCount = 0;
       for (var i = 0; i < list.length; i++) {
-        totalSum += Number(list[i].sum || 0);
+        // «Сумма» — это заработок водителя (уже без комиссии агрегатора).
+        totalSum += Number(list[i].earning != null ? list[i].earning : (list[i].sum || 0));
         totalCount += Number(list[i].count || 0);
       }
       var labels = { day: "День", week: "Неделя", month: "Месяц" };
@@ -881,14 +920,14 @@
       }).join("");
       var maxSum = 0;
       for (var m = 0; m < list.length; m++) {
-        maxSum = Math.max(maxSum, Number(list[m].sum || 0));
+        maxSum = Math.max(maxSum, Number(list[m].earning != null ? list[m].earning : (list[m].sum || 0)));
       }
       function dayNum(iso) {
         var parts = String(iso || "").split("-");
         return parts.length === 3 ? parts[2] : "";
       }
       var bars = list.map(function (b) {
-        var sum = Number(b.sum || 0);
+        var sum = Number(b.earning != null ? b.earning : (b.sum || 0));
         var h = maxSum > 0 ? Math.max(4, Math.round((sum / maxSum) * 100)) : 4;
         return '<button class="bar-col" data-act="d-day-open" data-date="' + esc(b.date) + '">' +
           '<span class="bar-sum">' + (sum ? Math.round(sum) : "") + "</span>" +
@@ -913,17 +952,40 @@
       var day = el.dataset.date || "";
       window._statDay = day;
       window._statDayOrders = null;
-      go("d-day-orders");
+      go("d-day-summary");
       api("/api/act", { op: "driver.day", date: day }).then(function (data) {
-        if (screen !== "d-day-orders" || window._statDay !== day) return;
+        if (screen !== "d-day-summary" || window._statDay !== day) return;
         window._statDayOrders = (data && data.orders) || [];
         render();
       }).catch(function (e) {
-        if (screen !== "d-day-orders" || window._statDay !== day) return;
+        if (screen !== "d-day-summary" || window._statDay !== day) return;
         window._statDayOrders = [];
         toast(e.message || "Не удалось загрузить заявки дня");
         render();
       });
+    },
+    "d-day-summary": function () {
+      // Сначала итог дня: сколько заработал и сколько заявок сделал.
+      var day = window._statDay || "";
+      var list = window._statDayOrders;
+      var loading = !Array.isArray(list);
+      if (loading) {
+        return "<h2>" + esc(day) + "</h2><p class='list-empty'>Загружаем итоги дня…</p>" +
+          '<button class="btn ghost" data-act="tab" data-screen="d-today">Назад к графику</button>';
+      }
+      var totals = dayTotals(list);
+      return "<h2>" + esc(day) + "</h2>" +
+        '<div class="stat-grid"><div class="stat"><span class="muted">Заработал</span><b>' +
+        money(totals.earning) + '</b></div><div class="stat"><span class="muted">Заявок</span><b>' +
+        totals.count + "</b></div></div>" +
+        (totals.waiting > 0 ? '<div class="card"><div class="row"><span class="muted">В том числе ожидание</span><b>' +
+          money(totals.waiting) + "</b></div></div>" : "") +
+        '<button class="btn" data-act="d-day-orders-open">Заказы за день' +
+        (totals.count ? " · " + totals.count : "") + "</button>" +
+        '<button class="btn ghost" data-act="tab" data-screen="d-today">Назад к графику</button>';
+    },
+    "d-day-orders-open": function () {
+      go("d-day-orders");
     },
     "d-day-orders": function () {
       var day = window._statDay || "";
@@ -937,21 +999,29 @@
           var ts = o.completed_at || o.created_at || "";
           return ts.slice(0, 10) === day;
         });
-        if (!list.length) {
-          return "<h2>" + (day || "Заявки") + "</h2>" +
-            '<p class="list-empty">Загружаем заявки дня…</p>';
-        }
       }
-      var sum = list.reduce(function (acc, o) {
-        return acc + Number(o.final_price || o.price || 0);
-      }, 0);
-      return "<h2>" + (day || "Заявки") + "</h2>" +
-        '<div class="stat-grid"><div class="stat"><span class="muted">Заработано</span><b>' +
-        money(sum) + '</b></div><div class="stat"><span class="muted">Заявок</span><b>' +
-        list.length + "</b></div></div>" +
-        (list.length ? list.map(function (o) {
-          return orderCard(o, "d-today-open");
-        }).join("") : '<p class="list-empty">За этот день заявок нет</p>') +
+      var totals = dayTotals(list);
+      var body = list.length
+        ? list.map(function (o) {
+            var stops = (o.waypoints || []).map(function (w) {
+              return typeof w === "string" ? w : (w.text || w.address || "");
+            }).filter(Boolean);
+            return '<button class="order" data-act="d-today-open" data-id="' + o.id + '">' +
+              '<div class="row">' + badge(o.status) + "<b>" + money(orderEarning(o)) + "</b></div>" +
+              '<div class="route" style="margin-top:8px">' + esc(o.pickup) +
+              (stops.length ? stops.map(function (s) { return "<small>⏸ " + esc(s) + "</small>"; }).join("") : "") +
+              "<small>" + esc(o.destination) + "</small></div>" +
+              '<div class="muted" style="margin-top:6px">#' + o.id + " · " +
+              (o.completed_at ? esc(fmtDateTime(o.completed_at)) : "—") + "</div></button>";
+          }).join("")
+        : (loading
+          ? '<p class="list-empty">Загружаем заявки дня…</p>'
+          : '<p class="list-empty">За этот день заявок нет</p>');
+      return "<h2>" + esc(day || "Заявки") + "</h2>" +
+        '<div class="stat-grid"><div class="stat"><span class="muted">Заработал</span><b>' +
+        money(totals.earning) + '</b></div><div class="stat"><span class="muted">Заявок</span><b>' +
+        totals.count + "</b></div></div>" +
+        body +
         '<button class="btn ghost" data-act="tab" data-screen="d-today">Назад к графику</button>';
     },
     "d-today-detail": function () {
@@ -969,32 +1039,82 @@
         "<small>" + esc(o.destination) + "</small></div>" +
         '<div class="row" style="margin-top:12px"><span class="muted">Расстояние</span><b>' + Number(o.distance || 0).toFixed(1) + " км</b></div>" +
         '<div class="row"><span class="muted">Время</span><b>' + (o.time_minutes || 0) + " мин</b></div>" +
-        '<div class="row"><span class="muted">Стоимость</span><b>' + money(o.final_price || o.price) + "</b></div>" +
-        (Number(o.waiting_cost || 0) > 0 ? '<div class="row"><span class="muted">Ожидание</span><b>' + money(o.waiting_cost) + "</b></div>" : "") +
+        (o.created_at ? '<div class="row"><span class="muted">Создана</span><b>' + esc(fmtDateTime(o.created_at)) + "</b></div>" : "") +
         (o.completed_at ? '<div class="row"><span class="muted">Завершена</span><b>' + esc(fmtDateTime(o.completed_at)) + "</b></div>" : "") +
+        (o.pickup_city || o.destination_city ? '<div class="row"><span class="muted">Город</span><b>' +
+          esc([o.pickup_city, o.destination_city].filter(Boolean).join(" → ")) + "</b></div>" : "") +
         "</div>" +
-        '<button class="btn ghost" data-act="tab" data-screen="d-today">К списку</button>';
+        // Деньги: стоимость с пассажира, комиссия агрегатора, заработок.
+        '<div class="card"><div class="row"><span class="muted">Стоимость</span><b>' +
+        money(o.total_price != null ? o.total_price : (Number(o.final_price || o.price || 0) + Number(o.waiting_cost || 0))) +
+        "</b></div>" +
+        (Number(o.waiting_cost || 0) > 0
+          ? '<div class="row"><span class="muted">В том числе ожидание</span><b>' + money(o.waiting_cost) + "</b></div>"
+          : "") +
+        (Number(o.commission_amount || 0) > 0
+          ? '<div class="row"><span class="muted">Комиссия' +
+            (Number(o.commission_percent || 0) > 0 ? " (" + Number(o.commission_percent) + "%)" : "") +
+            "</span><b>−" + money(o.commission_amount) + "</b></div>"
+          : "") +
+        '<div class="row"><span class="muted">Заработок</span><b>' + money(orderEarning(o)) + "</b></div></div>" +
+        // Телефон пассажира водителю не показываем — только «Написать».
+        '<button class="btn" data-act="sheet-chat" data-id="' + o.id + '">Написать пассажиру</button>' +
+        '<button class="btn ghost" data-act="tab" data-screen="d-day-orders">К списку</button>';
     },
     "d-orders": function () {
       var list = (S.driver && S.driver.available) || [];
-      var waiting = Number(S.driver.pending_waiting || 0);
+      var groups = (S.driver && S.driver.groups) || [];
+      var waiting = Number((S.driver && S.driver.pending_waiting) || 0);
+      var mode = window._ordersMode || "all";
       var head = '<div class="card"><b>Ждут водителя сейчас: ' + waiting + "</b>" +
         '<p class="muted">' + (waiting
           ? "Эти заказы ищут водителя. Ваших доступных: " + list.length
           : "Новых заказов нет — как только появятся, они будут здесь") +
         "</p></div>";
+      // Пункты: все заказы / город по районам / межгород.
+      var modes = [["all", "Все"], ["district", "По районам"], ["intercity", "Межгород"]];
+      var switcher = '<div class="periods">' + modes.map(function (m) {
+        return '<button class="' + (mode === m[0] ? "on" : "") + '" data-act="d-orders-mode" data-p="' +
+          m[0] + '">' + m[1] + "</button>";
+      }).join("") + "</div>";
       if (S.user.line !== "online") {
-        return "<h2>Список заказов</h2>" + head +
+        return "<h2>Заказы</h2>" + head + switcher +
           '<p class="list-empty">Сначала выйдите на линию, чтобы видеть заказы и принимать их</p>';
       }
-      return "<h2>Список заказов</h2>" + head +
-        (list.length ? list.map(function (o) {
-          return '<div class="card">' + orderCard(o, "noop") + '<button class="btn" data-act="accept" data-id="' + o.id + '">Принять</button></div>';
-        }).join("") : '<p class="list-empty">Свободных заказов нет</p>');
+      function card(o) {
+        return '<div class="card">' + orderCard(o, "noop") +
+          '<button class="btn" data-act="accept" data-id="' + o.id + '">Принять</button></div>';
+      }
+      var body = "";
+      if (mode === "all") {
+        body = list.length ? list.map(card).join("") : '<p class="list-empty">Свободных заказов нет</p>';
+      } else {
+        var want = mode === "intercity" ? "intercity" : "district";
+        var shown = groups.filter(function (g) { return g.kind === want; });
+        body = shown.length ? shown.map(function (g) {
+          return '<div class="row" style="margin-top:14px"><b>' + esc(g.title) + "</b>" +
+            '<span class="muted">' + g.count + " · " +
+            (g.distance_km != null ? Number(g.distance_km).toFixed(1) + " км" : "—") + "</span></div>" +
+            (g.orders || []).map(card).join("");
+        }).join("") : '<p class="list-empty">' + (want === "intercity"
+          ? "Междугородних заказов сейчас нет"
+          : "Заказов по районам сейчас нет") + "</p>";
+      }
+      return "<h2>Заказы</h2>" + head + switcher + body;
     },
     "d-current": function () {
       var o = S.driver.current;
-      if (!o) return "<h2>Текущие заказы</h2><p class=\"list-empty\">Нет активного рейса</p>";
+      var nx = S.driver.next;
+      var nextBlock = nx ? '<div class="card"><div class="row"><b>Следующий рейс #' + nx.id + "</b>" +
+        '<span class="badge wait">в очереди</span></div>' +
+        '<div class="route" style="margin-top:8px">' + esc(nx.pickup) +
+        "<small>" + esc(nx.destination) + "</small></div>" +
+        '<p class="muted">Пока не завершён текущий рейс, управлять следующим нельзя</p></div>' : "";
+      if (!o) {
+        return "<h2>Рейс</h2>" +
+          (nextBlock || '<p class="list-empty">Нет активного рейса</p>') +
+          '<button class="btn ghost" data-act="tab" data-screen="d-orders">К заказам</button>';
+      }
       var actions = "";
       if (o.status === "accepted") actions = '<button class="btn" data-act="arrived" data-id="' + o.id + '">Я прибыл</button>';
       if (o.status === "driver_arrived") actions = '<button class="btn" data-act="start-trip" data-id="' + o.id + '">Начать движение</button>';
@@ -1028,7 +1148,10 @@
           '<button class="btn ghost" data-act="sheet-chat" data-id="' + o.id + '">Написать</button>' +
         '</div>' +
         '<button class="btn ghost" data-act="max-call" data-id="' + o.id + '" data-peer="' + esc(o.passenger_id || "") + '" data-phone="' + esc(o.passenger_phone || "") + '">📞 Позвонить через MAX</button>' +
-        (["accepted", "driver_arrived", "in_progress", "pending"].indexOf(o.status) >= 0 ? '<button class="btn danger" data-act="d-cancel" data-id="' + o.id + '">Отменить заказ</button>' : "");
+        (["accepted", "driver_arrived", "in_progress", "pending"].indexOf(o.status) >= 0
+          ? '<button class="btn danger" data-act="d-cancel" data-id="' + o.id + '">Отменить заказ</button>'
+          : "") +
+        nextBlock;
     },
     "d-profile": function () {
       var today = (S.driver && S.driver.today) || {};
@@ -1891,6 +2014,14 @@
     "d-period": function (el) {
       window._statPeriod = el.dataset.p || "week";
       render();
+    },
+    "d-orders-mode": function (el) {
+      window._ordersMode = el.dataset.p || "all";
+      render();
+    },
+    "d-cancel": function (el) {
+      // Отмена заказа водителем (раньше кнопка была без обработчика).
+      run({ op: "driver.cancel", id: Number(el.dataset.id) });
     },
     "d-today-open": function (el) {
       picked = Number(el.dataset.id);
