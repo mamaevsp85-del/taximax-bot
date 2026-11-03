@@ -663,23 +663,11 @@
       var intercity = !!(d.pickup_city && d.destination_city &&
         String(d.pickup_city).toLowerCase() !== String(d.destination_city).toLowerCase());
 
-      var pickupBlock = d.pickup
-        ? '<div class="of-row of-pickup">' +
-            '<i class="of-pin"></i><span class="of-txt" data-act="of-edit-pickup"><small>' +
-            cityLine("Откуда", d.pickup_city) + "</small><b>" +
-            esc(pickupLine(d)) + "</b></span>" +
-            '<button type="button" class="of-geo" data-act="my-geo" data-field="pickup" title="Моё место">📍</button>' +
-            '<em data-act="of-edit-pickup">изменить ›</em></div>'
-        : '<div class="of-row of-pickup">' + field("pickup", "Откуда", "", "Город, улица, дом") +
-            geoBtn("pickup") + "</div>";
+      var pickupBlock = '<div class="of-row of-pickup"><i class="of-pin"></i>' +
+        field("pickup", "Откуда", d.pickup || "", "Город, улица, дом") + "</div>";
 
-      var destBlock = d.destination
-        ? '<div class="of-row of-dest"><i class="of-flag"></i>' +
-            '<span class="of-txt" data-act="of-edit-dest"><small>' + cityLine("Куда", d.destination_city) +
-            "</small><b>" + esc(d.destination) +
-            '</b></span><em data-act="of-edit-dest">изменить ›</em></div>'
-        : '<div class="of-row of-dest">' + field("dest", "Куда", "", "Улица и дом — город подставим сам") +
-            "</div>";
+      var destBlock = '<div class="of-row of-dest"><i class="of-flag"></i>' +
+        field("dest", "Куда", d.destination || "", "Город, улица, дом") + "</div>";
 
       // Остановки — инлайн, без модального окна.
       var stopsHtml = stops.map(function (s, i) {
@@ -717,7 +705,7 @@
         '<div id="trip-sum">' + summary + "</div>" +
         '<p class="muted of-hint">' + (ready
           ? "Проверьте адреса и нажмите «Заказать» — водитель увидит их сразу."
-          : "Город подставляется автоматически — писать «г. Черногорск» не нужно.") + "</p>";
+          : "Введите улицу и дом. Город можно не писать — подставим ваш.") + "</p>";
     },
     live: function () {
       var o = (S.passenger.orders || []).filter(function (x) { return String(x.id) === String(picked); })[0] || S.passenger.active;
@@ -1507,186 +1495,22 @@
   }
 
   // ==================== АВТОДОПОЛНЕНИЕ АДРЕСА ====================
+  // Геолокацию и карту НЕ используем: адреса вводятся вручную,
+  // подсказки приходят из справочника адресов (это не гео устройства).
   var _suggestTimer = null;
   var _suggestSeq = 0;
 
-  function geoBtn(fieldId) {
-    return '<button type="button" class="btn ghost geo-btn" data-act="my-geo" data-field="' + fieldId + '">Моё место</button>';
-  }
-
-  var _geoPoints = {};
-
-  function clearGeoPoint(inputId) {
-    delete _geoPoints[inputId];
+  // Сброс координат, если адрес изменили вручную.
+  function clearCoords(inputId) {
     if (!draft) return;
     if (inputId === "pickup") draft.pickup_coords = null;
-    if (inputId === "dest") {
+    if (inputId === "dest" || inputId === "newdest") {
       draft.dest_coords = null;
       draft.destination_coords = null;
     }
   }
 
-  function putGeoAddress(inputId, res) {
-    var address = (res && res.address) || "";
-    if (!address) { toast("Адрес по точке не найден"); return; }
-    var point = { lat: res.lat, lon: res.lon };
-    _geoPoints[inputId] = point;
-    if (!draft) draft = { step: 1 };
-    if (inputId === "dest" || inputId === "newdest" || inputId === "fdest") {
-      draft.destination = address;
-      draft.dest_coords = point;
-      draft.destination_coords = point;
-      if (res.city) draft.destination_city = res.city;
-    } else if (inputId === "stop" || inputId === "newstop") {
-      draft.stop = address;
-    } else {
-      draft.pickup = address;
-      draft.pickup_coords = point;
-      if (res.city) draft.pickup_city = res.city;
-      if (!draft.step) draft.step = 1;
-    }
-    if (screen !== "trip" && (inputId === "pickup" || inputId === "dest")) {
-      screen = "trip";
-    }
-    render();
-    var input = document.getElementById(inputId);
-    if (input) input.value = address;
-    // Оба адреса известны — сразу считаем цену (минимум действий).
-    if (draft && draft.pickup && draft.destination && screen === "trip") {
-      draft._quoteKey = "";
-      quoteDraft();
-    }
-    toast("Адрес подставлен");
-  }
-
-  function mapStart() {
-    var u = (S && S.user) || {};
-    var lat = Number(u.lat);
-    var lon = Number(u.lon);
-    if (lat && lon) return { lat: lat, lon: lon };
-    var city = String(u.home_city || "").toLowerCase();
-    var known = {
-      "черногорск": [53.8236, 91.2836],
-      "абакан": [53.7212, 91.4424],
-      "минусинск": [53.7103, 91.6872],
-      "саяногорск": [53.0896, 91.4122],
-      "красноярск": [56.0153, 92.8932]
-    };
-    var point = known[city] || known["черногорск"];
-    return { lat: point[0], lon: point[1] };
-  }
-
-  function mountGeoMap(root, lat, lon) {
-    var z = 16;
-    var worldX = 0;
-    var worldY = 0;
-    var moved = false;
-
-    function lonToX(value, zoom) {
-      return (value + 180) / 360 * Math.pow(2, zoom);
-    }
-    function latToY(value, zoom) {
-      var rad = value * Math.PI / 180;
-      var n = Math.log(Math.tan(rad) + 1 / Math.cos(rad));
-      return (1 - n / Math.PI) / 2 * Math.pow(2, zoom);
-    }
-    function xToLon(value, zoom) {
-      return value / Math.pow(2, zoom) * 360 - 180;
-    }
-    function yToLat(value, zoom) {
-      var n = Math.PI - 2 * Math.PI * value / Math.pow(2, zoom);
-      return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
-    }
-    function setCenter(nextLat, nextLon) {
-      worldX = lonToX(nextLon, z) * 256;
-      worldY = latToY(nextLat, z) * 256;
-      draw();
-    }
-    function draw() {
-      var old = root.querySelectorAll("img");
-      for (var i = 0; i < old.length; i++) old[i].remove();
-      var rect = root.getBoundingClientRect();
-      var w = rect.width || 300;
-      var h = rect.height || 280;
-      var n = Math.pow(2, z);
-      var leftTile = Math.floor((worldX - w / 2) / 256) - 1;
-      var rightTile = Math.floor((worldX + w / 2) / 256) + 1;
-      var topTile = Math.floor((worldY - h / 2) / 256) - 1;
-      var bottomTile = Math.floor((worldY + h / 2) / 256) + 1;
-      for (var tx = leftTile; tx <= rightTile; tx++) {
-        for (var ty = topTile; ty <= bottomTile; ty++) {
-          if (ty < 0 || ty >= n) continue;
-          var img = document.createElement("img");
-          var wrapped = ((tx % n) + n) % n;
-          img.alt = "";
-          img.src = "https://tile.openstreetmap.org/" + z + "/" + wrapped + "/" + ty + ".png";
-          img.style.left = (tx * 256 - worldX + w / 2) + "px";
-          img.style.top = (ty * 256 - worldY + h / 2) + "px";
-          root.appendChild(img);
-        }
-      }
-      window._mapCenter = {
-        lat: yToLat(worldY / 256, z),
-        lon: xToLon(worldX / 256, z)
-      };
-    }
-    setCenter(lat, lon);
-    var drag = null;
-    root.addEventListener("pointerdown", function (e) {
-      if (e.target.closest("button")) return;
-      drag = { x: e.clientX, y: e.clientY, wx: worldX, wy: worldY };
-      root.setPointerCapture(e.pointerId);
-    });
-    root.addEventListener("pointermove", function (e) {
-      if (!drag) return;
-      worldX = drag.wx - (e.clientX - drag.x);
-      worldY = drag.wy - (e.clientY - drag.y);
-      moved = true;
-      draw();
-    });
-    root.addEventListener("pointerup", function () { drag = null; });
-    root.addEventListener("pointercancel", function () { drag = null; });
-    window._geoMap = {
-      zoom: function (delta) {
-        var center = window._mapCenter;
-        z = Math.max(13, Math.min(18, z + delta));
-        setCenter(center.lat, center.lon);
-      }
-    };
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(function (pos) {
-        if (moved) return;
-        setCenter(pos.coords.latitude, pos.coords.longitude);
-      }, function () {}, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
-    }
-  }
-
-  function openGeoMap(inputId) {
-    window._geoField = inputId;
-    var start = mapStart();
-    sheet("<h2>Где вы</h2><p class=\"muted\">Сдвиньте карту, чтобы метка стояла на доме.</p>" +
-      '<div class="geo-map" id="geomap"><i class="geo-pin"></i>' +
-      '<div class="geo-zoom"><button type="button" data-act="geo-zoom" data-z="1">+</button>' +
-      '<button type="button" data-act="geo-zoom" data-z="-1">−</button></div></div>' +
-      '<p class="geo-copy">© OpenStreetMap</p>' +
-      '<button class="btn" data-act="geo-map-ok">Подставить адрес</button>');
-    mountGeoMap(document.getElementById("geomap"), start.lat, start.lon);
-  }
-
-  function useMyLocation(inputId) {
-    window._geoField = inputId;
-    if (!navigator.geolocation) {
-      openGeoMap(inputId);
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(function (pos) {
-      api("/api/act", { op: "geo.resolve", lat: pos.coords.latitude, lon: pos.coords.longitude }).then(function (res) {
-        putGeoAddress(inputId, res);
-      }).catch(function () { openGeoMap(inputId); });
-    }, function () {
-      openGeoMap(inputId);
-    }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
-  }
+  // Гео (устройства и карта) не используется: адрес всегда вводится вручную.
 
   function fullAddress(it) {
     if (!it) return "";
@@ -1732,7 +1556,7 @@
             e.preventDefault();
             var it = items[Number(btn.dataset.i)];
             input.value = fullAddress(it);
-            clearGeoPoint(inputId);
+            clearCoords(inputId);
             hide();
             if (onPick) onPick(it);
           });
@@ -1755,7 +1579,7 @@
     }
 
     input.addEventListener("input", function () {
-      clearGeoPoint(inputId);
+      clearCoords(inputId);
       var q = input.value.trim();
       clearTimeout(_suggestTimer);
       if (q.length < 2) { hide(); return; }
@@ -1772,9 +1596,10 @@
   }
 
   // ==================== ОДНОЭКРАННЫЙ ЗАКАЗ ====================
-  // Идея: минимум действий. Подача подставляется сама (последний адрес или
-  // GPS), пассажир вводит только «Куда». Как только оба адреса известны —
-  // цена считается автоматически, остаётся одно нажатие «Заказать».
+  // Идея: минимум действий. Оба адреса вводятся вручную, но подача
+  // подставляется из прошлой поездки (её можно сразу поправить).
+  // Цена считается сама, остаётся одно нажатие «Заказать».
+  // Геолокация устройства НЕ используется.
   function freshDraft() {
     return {
       step: 1, pickup: "", pickup_coords: null, pickup_city: "",
@@ -1789,9 +1614,11 @@
     });
   }
 
-  // Подача по умолчанию: последний адрес из истории -> иначе GPS -> иначе город.
+  // Подача по умолчанию — последний адрес из истории поездок (без GPS).
   function prefillPickup() {
     if (!draft || draft.pickup) return;
+    var home = (S.user && S.user.home_city) || "";
+    if (home) draft.pickup_city = home;
     var orders = (S && S.passenger && S.passenger.orders) || [];
     for (var i = 0; i < orders.length; i++) {
       var o = orders[i];
@@ -1799,24 +1626,9 @@
       if (["completed", "cancelled"].indexOf(o.status) < 0) continue;
       draft.pickup = o.pickup;
       draft.pickup_coords = o.pickup_coords || null;
-      draft.pickup_city = o.pickup_city || (S.user.home_city || "");
+      draft.pickup_city = o.pickup_city || home;
       render();
       return;
-    }
-    var home = (S.user && S.user.home_city) || "";
-    if (home) draft.pickup_city = home;
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(function (pos) {
-        api("/api/act", { op: "geo.resolve", lat: pos.coords.latitude, lon: pos.coords.longitude })
-          .then(function (res) {
-            if (!draft || draft.pickup) return;
-            if (!res || !res.address) return;
-            draft.pickup = res.address;
-            draft.pickup_coords = { lat: res.lat, lon: res.lon };
-            if (res.city) draft.pickup_city = res.city;
-            render();
-          }).catch(function () {});
-      }, function () {}, { enableHighAccuracy: true, timeout: 6000, maximumAge: 120000 });
     }
   }
 
@@ -2060,21 +1872,6 @@
         if (data.state) { S = normalizeState(data.state); screen = entryScreen(); render(); }
       }).catch(function (e) { toast(e.message); });
     },
-    "my-geo": function (el) {
-      useMyLocation(el.dataset.field || "pickup");
-    },
-    "geo-zoom": function (el) {
-      if (window._geoMap) window._geoMap.zoom(Number(el.dataset.z) || 1);
-    },
-    "geo-map-ok": function () {
-      var center = window._mapCenter;
-      var field = window._geoField || "pickup";
-      if (!center) return;
-      api("/api/act", { op: "geo.resolve", lat: center.lat, lon: center.lon }).then(function (res) {
-        closeSheet();
-        putGeoAddress(field, res);
-      }).catch(function (e) { toast(e.message || "Адрес не найден"); });
-    },
     start: function () {
       if (needOnboarding()) {
         window._onbStep = 1;
@@ -2217,7 +2014,6 @@
       var o = orderById(Number(el.dataset.id)) || (S.driver && S.driver.current) || {};
       sheet("<h2>Новый адрес</h2><p class=\"muted\">Куда ехать вместо текущего адреса.</p>" +
         field("newdest", "Куда", o.destination || "", "Город, улица, дом") +
-        geoBtn("newdest") +
         '<button class="btn" data-act="save-live-dest" data-id="' + el.dataset.id + '">Пересчитать</button>');
       attachSuggest("newdest", function (it) {
         var input = document.getElementById("newdest");
@@ -2227,13 +2023,11 @@
     "save-live-dest": function (el) {
       var dest = val("newdest");
       if (dest.length < 3) { toast("Укажите адрес"); return; }
-      var point = _geoPoints.newdest || null;
       closeSheet();
-      run({ op: "order.route", id: Number(el.dataset.id), destination: dest, destination_coords: point });
+      run({ op: "order.route", id: Number(el.dataset.id), destination: dest });
     },
     "sheet-live-stop": function (el) {
       sheet("<h2>Остановка</h2>" + field("newstop", "Адрес остановки", "", "Город, улица, дом") +
-        geoBtn("newstop") +
         '<button class="btn" data-act="save-live-stop" data-id="' + el.dataset.id + '">Добавить</button>');
       attachSuggest("newstop", function (it) {
         var input = document.getElementById("newstop");
@@ -2406,10 +2200,8 @@
         var fav = ((S.passenger && S.passenger.favorites) || [])[index] || {};
         sheet("<h2>Избранный заказ</h2>" +
           field("fpickup", "Откуда", d.pickup || fav.pickup || "", "Город, улица, дом") +
-          geoBtn("fpickup") +
           field("fentrance", "Подъезд", d.entrance || fav.entrance || "", "номер") +
           field("fdest", "Куда", d.destination || fav.destination || "", "Город, улица, дом") +
-          geoBtn("fdest") +
           field("flabel", "Название", d.label || fav.label || "", "Дом → Работа") +
           '<button class="btn" data-act="save-fav" data-index="' + index + '">Сохранить</button>');
         attachSuggest("fpickup", null);

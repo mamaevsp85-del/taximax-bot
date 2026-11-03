@@ -42,11 +42,21 @@ class SingleScreenOrderTests(unittest.TestCase):
         summary = self._block("function tripSummaryHtml() {")
         self.assertIn('data-act="confirm"', summary)
 
-    def test_pickup_prefilled_automatically(self):
+    def test_pickup_prefilled_from_history_only(self):
         self.assertIn("function prefillPickup", self.src)
-        self.assertIn("getCurrentPosition", self.src)
         start = self._block("start: function () {")
         self.assertIn("prefillPickup()", start)
+        # Геолокация устройства не используется вовсе.
+        self.assertNotIn("navigator.geolocation", self.src)
+        prefill = self._block("function prefillPickup() {")
+        self.assertIn("passenger.orders", prefill)
+        self.assertIn("completed", prefill)
+
+    def test_no_geo_controls_left(self):
+        # Ни карты, ни кнопок «Моё место» — апп их не обрабатывает.
+        for token in ("geoBtn", "my-geo", "geo-map-ok", "geo-zoom",
+                      "mountGeoMap", "openGeoMap", "useMyLocation", "_geoPoints"):
+            self.assertNotIn(token, self.src, f"остался гео-элемент: {token}")
 
     def test_price_calculated_automatically(self):
         self.assertIn("function quoteDraft", self.src)
